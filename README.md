@@ -1,0 +1,90 @@
+# 工时簿 · Work and Play
+
+工时簿是一款个人 macOS 时间统计 App。它自动记录电脑上的有效前台活动，用来回顾一天花了多少时间在工作、加班和摸鱼，以及时间主要花在哪些 App 和网站上。报告可以按日、周、月、年和全部查看。数据保存在本机 SQLite，无需账号。
+
+- **普通工时与加班**按你设置的上下班、午休和临时排班统计。休息时段只保留有效工作，计入加班。
+- **活动明细**可查看每段的起止、时长、来源、分类依据，以及为何计入加班。
+- **网站统计**通过 Chrome 或 Edge 扩展记录域名，汇总前台访问次数、有效停留，以及工作和摸鱼时长。两个浏览器访问同一域名的数据会合并。
+- **桌面与菜单栏**可在 Dock 打开主窗口。关闭窗口后仍可通过菜单栏查看状态和暂停计时。
+
+## 安装 macOS App
+
+系统要求为 **macOS 14 或更新版本**。下载包包含 Apple 芯片与 Intel 架构。
+
+1. 从 [GitHub Releases](https://github.com/xiaosu19/work-and-play/releases/latest) 下载 `WorkAndPlay-1.0.0-universal.zip` 并解压。
+2. 把 `WorkAndPlay.app` 拖到 Finder 的「应用程序」，双击打开。保留同包的 `install-chrome-host.sh`，安装浏览器扩展时会用到。
+3. 打开「设置 → 休息排班 → 按上下班设置」，填写上班、午休开始和结束、下班时间，选择应用到哪些星期。多段休息、全天休息和个别日期的临时排班也可以单独设置。
+
+下载包使用临时签名，尚未经过 Apple 公证。macOS 可能会弹出来源确认。可查看系统提示说明，也可以按下文从源码构建。 [Apple 关于安全打开 App 的说明](https://support.apple.com/en-us/102445)
+
+如果同时下载了 `SHA256SUMS.txt`，在两个文件所在目录运行 `shasum -a 256 -c SHA256SUMS.txt` 可以校验压缩包。
+
+## 安装 Chrome 或 Microsoft Edge 扩展
+
+App 单独运行即可按应用名称计时。接入网页统计需要完成**注册本机连接器**和**在浏览器加载扩展**两步。扩展随安装包提供，通过浏览器的本地扩展加载入口安装。
+
+### 1. 注册本机连接器
+
+在终端进入解压后的目录，运行以下命令。如果 App 放在其他位置，最后一个参数换成实际完整路径。脚本给当前 macOS 用户注册连接器，无需 `sudo`。
+
+```sh
+cd ~/Downloads/WorkAndPlay-1.0.0
+bash ./install-chrome-host.sh /Applications/WorkAndPlay.app
+```
+
+记下脚本输出的「扩展目录」，下一步要选择它。如果 App 放在 `/Applications`，目录为 `/Applications/WorkAndPlay.app/Contents/Resources/chrome-extension`。
+
+### 2. 在浏览器加载扩展
+
+| 浏览器 | 操作 |
+| --- | --- |
+| Chrome | 在地址栏输入 `chrome://extensions`，开启「开发者模式」，点击「加载已解压的扩展程序」并选中上一步的目录。 [Chrome 官方指南](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world#load-unpacked) |
+| Edge | 在地址栏输入 `edge://extensions`，开启「开发人员模式」，点击「加载解压缩的扩展」并选中上一步的目录。 [Edge 官方指南](https://learn.microsoft.com/en-us/microsoft-edge/extensions/getting-started/extension-sideloading) |
+
+在 macOS 的文件选择窗口，可以按 `⌘⇧G` 粘贴完整目录路径。两个浏览器要分别加载一次。加载后，扩展列表会显示「工时簿 · 浏览器扩展」。
+
+### 3. 确认能识别网页
+
+1. 保持工时簿运行，在浏览器的普通窗口打开一个网页，例如 `https://developer.apple.com/`。网页在安装前已经打开时，刷新一次。
+2. 从浏览器工具栏的扩展菜单打开工时簿扩展。弹窗显示「已连接工时簿，可以识别当前网页」即表示网页可读。
+3. 在该网页翻页、滚动或进行其他有效互动，然后打开「时间总览 → 网站统计」核对域名、访问次数和有效停留时长。采集状态在前台网页可读时会显示「Chrome 页面级」或「Edge 页面级」。
+
+如果扩展未连接，检查 App 是否正在运行，并用当前 App 路径重跑注册脚本。如果已连接但网页没有信号，刷新页面并查看该扩展的网站访问权限。浏览器内部页面、无痕窗口和无网站权限的页面会回退到应用级统计。移动 App 或更新安装包后，用新路径注册连接器，并在扩展管理页重新加载扩展。
+
+## 日常使用
+
+1. 打开「时间总览」，选择日、周、月、年或全部。点击普通工时、加班或摸鱼卡片，可查看对应来源和时段。
+2. 在「网站统计」选择「设为 → 设为工作」或「设为摸鱼」，即可为未来访问保存规则。填写 `*.example.com` 或 `*example.com` 可覆盖 `example.com` 及其子域名。更具体的路径、窗口或项目条件可以在「设置 → 分类规则」里配置。
+3. 在「时间片段」点击「修正」可以改一条已有记录。网站分类规则从新的有效活动开始生效，报表上的历史时长按片段原有分类汇总。
+
+工时簿按已知 App、网站和可用窗口信号自动分类。普通时段的未知活动按当前报表口径计入摸鱼，片段会标明识别依据。浏览器只提供应用名时，条目会标出「当时未取得网页信息」。
+
+| 场景 | 默认计时方式 |
+| --- | --- |
+| 写代码、终端操作 | 键鼠活动续计，连续空闲 180 秒后停止。 |
+| 阅读文档 | 开页、翻页或有效滚动续计，默认上限 120 秒。 |
+| 前台看视频 | 可在「设置 → 计时」打开前台视频计时。只有归为摸鱼、可见且正在播放的网页视频才按播放状态续计。 |
+| 工作时后台放歌，或后台跑构建 | 同一时刻只统计一个前台活动。后台音乐、视频和任务不另计。 |
+| 锁屏、睡眠、暂停 | 当前计时停止，恢复后使用新的活动信号。 |
+
+## 权限与本机数据
+
+- **辅助功能**为可选权限，用于读取前台窗口标题和区分窗口。窗口标题只在内存里用于匹配。App 不需要屏幕录制或麦克风权限。
+- **网站访问权限**决定扩展能在哪些站点识别前台网页。扩展通过本机连接器传递域名、匹配所需路径、互动时间和播放状态。历史只保存适合核对的应用或域名，查询参数、URL 片段、页面正文和按键内容不会写入记录。
+- 数据与规则保存在 `~/Library/Application Support/WorkAndPlay/history.sqlite3`。App 无账号和云同步。休息时段的摸鱼、未分类和空闲活动在写入前过滤。
+
+## 从源码构建和验证
+
+需要 macOS 14 或更新版本、Apple Command Line Tools 或 Xcode，以及 Swift 6.0 或更新版本。构建和验证使用系统 SQLite。
+
+```sh
+git clone https://github.com/xiaosu19/work-and-play.git
+cd work-and-play
+swift run Verification
+./scripts/build-app.sh
+open dist/WorkAndPlay.app
+```
+
+要给此构建接入浏览器，运行 `./scripts/install-chrome-host.sh` 并按上文加载脚本输出的扩展目录。在能交叉编译 macOS 两种架构的工具链上，`./scripts/build-app.sh --universal` 可生成通用 App。
+
+`swift run Verification` 会验证空闲与阅读计时、切换、分类规则、排班边界、跨午夜、浏览器掉线和 SQLite 隐私。要复测真实浏览器，先构建并退出工时簿，再运行 `node scripts/verify-chrome.mjs` 或 `node scripts/verify-chrome.mjs --edge --pages-only`。测试脚本使用隔离的浏览器配置、本地测试网页和临时数据库。项目规则和实现记录见 [AGENTS.md](AGENTS.md) 与 [DECISIONS.md](DECISIONS.md)。

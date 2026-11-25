@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "工时簿 · 浏览器扩展",
+  "version": "1.2.0",
+  "description": "把前台页面的域名、阅读互动和播放状态发送给本机工时簿。",
+  "permissions": [
+    "nativeMessaging",
+    "alarms"
+  ],
+  "background": {
+    "service_worker": "worker.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "page.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvlyrMiDP+kO4esHqrqd6vljR4V7hqfHN/5mqgTtclR7CJdfHRqgplXvkSaMeaIfyqsIirrEzWIvtwRYt3PcaVyDikWlPDuZY3O5GJJVxG/9/xT6hH2NkewGsPbnRzLsogoRoTibAJ0cq6AGPPMi1tVnZmDQxdT6fEA+RQqMiABth50kCY5KFdSl6bI4JLLsQgJ/oLfQJjK5vzlUS8brwxsLCpAhzL18q0+QSGsy+a7jhX/dZ7npfuZIUvhaA/bZ3PEE3Jb6Ox0VPmFzUsnjfUDRfgovEyRoPS6uFEasKn86DDJ7YEQ6F4RhRNGhATpWDImmLJfNaxI5EuL4yK3HQWwIDAQAB"
+}
