@@ -20,7 +20,7 @@ struct ClassificationAnalysis: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Color.workMuted)
                     .padding(.top, 13)
-                Text("工作含普通工时与加班。普通时段里，未识别为工作的活动计入摸鱼。")
+                Text("工作含普通工时与加班。无法判断用途的浏览器片段会单列为网页未识别。")
                     .font(.caption)
                     .foregroundStyle(Color.workMuted)
                     .padding(.top, 5)
@@ -64,7 +64,7 @@ struct ClassificationAnalysis: View {
 
             GeometryReader { geo in
                 HStack(spacing: 0) {
-                    ForEach(Bucket.displayCases) { bucket in
+                    ForEach(Bucket.reportCases) { bucket in
                         let duration = item.byBucket[bucket, default: 0]
                         Rectangle()
                             .fill(bucket.color)
@@ -79,6 +79,9 @@ struct ClassificationAnalysis: View {
             HStack(spacing: 16) {
                 amount("工作", item.work)
                 amount("摸鱼", item.entertainment)
+                if let missingWebsites = item.byBucket[.review], missingWebsites > 0 {
+                    amount(Bucket.review.title, missingWebsites)
+                }
             }
             .font(.caption.monospacedDigit())
             .foregroundStyle(Color.workMuted)

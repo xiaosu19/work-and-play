@@ -4,10 +4,12 @@ let session;
 let sequence;
 let generation = 0;
 let sampling = false;
+let sampleRequested = false;
 let activeTab;
 let connected = false;
 let ownedFocus = false;
 let pageAvailable = false;
+const loadingDocuments = new Map();
 
 function connect() {
   if (port) return;
@@ -38,8 +40,12 @@ function send(page, focused) {
 }
 
 async function sample() {
-  if (sampling) return;
+  if (sampling) {
+    sampleRequested = true;
+    return;
+  }
   sampling = true;
+  sampleRequested = false;
   const before = generation;
   let page = null;
   let focused = false;
@@ -49,8 +55,9 @@ async function sample() {
       focused = true;
       const [tab] = await chrome.tabs.query({ active: true, windowId: window.id });
       if (before === generation) activeTab = tab?.id;
-      if (tab?.id !== undefined && !tab.discarded && tab.status !== "loading") {
-        const snapshot = await chrome.tabs.sendMessage(tab.id, { type: "snapshot" }, { frameId: 0 });
+      if (tab?.id !== undefined && !tab.discarded) {
+        const target = snapshotTarget(tab);
+        const snapshot = target && await chrome.tabs.sendMessage(tab.id, { type: "snapshot" }, target);
         if (snapshot) page = { tab: tab.id, ...snapshot };
       }
     }
@@ -62,10 +69,16 @@ async function sample() {
       ownedFocus = focused;
       pageAvailable = page !== null;
       send(page, focused);
-    } else {
-      void sample();
     }
+    if (sampleRequested || before !== generation) void sample();
   }
+}
+
+function snapshotTarget(tab) {
+  if (tab.status !== "loading") return { frameId: 0 };
+  // During navigation, only ask the committed document that reported it was ready.
+  const documentId = loadingDocuments.get(tab.id);
+  return documentId === undefined ? null : { documentId };
 }
 
 function invalidate() {
@@ -78,14 +91,24 @@ function invalidate() {
 
 chrome.windows.onFocusChanged.addListener(invalidate);
 chrome.tabs.onActivated.addListener(invalidate);
-chrome.tabs.onRemoved.addListener(id => { if (id === activeTab) invalidate(); });
+chrome.tabs.onRemoved.addListener(id => {
+  loadingDocuments.delete(id);
+  if (id === activeTab) invalidate();
+});
 chrome.tabs.onUpdated.addListener((id, change) => {
+  if (change.status || change.discarded) loadingDocuments.delete(id);
   if (id !== activeTab) return;
   if (change.status === "loading" || change.discarded) invalidate();
   else if (change.status === "complete") void sample();
 });
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
-  if (message.type === "page-signal" && sender.frameId === 0 && sender.tab?.id === activeTab) {
+  if (message.type === "page-ready" && sender.frameId === 0 && sender.tab?.id !== undefined
+      && sender.tab.active && !sender.tab.incognito) {
+    if (sender.tab.status === "loading" && sender.documentLifecycle === "active" && sender.documentId) {
+      loadingDocuments.set(sender.tab.id, sender.documentId);
+    }
+    void sample();
+  } else if (message.type === "page-signal" && sender.frameId === 0 && sender.tab?.id === activeTab) {
     void sample();
   } else if (message.type === "status" && sender.url === chrome.runtime.getURL("popup.html")) {
     void sample();

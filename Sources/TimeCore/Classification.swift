@@ -113,7 +113,8 @@ public struct Rule: Codable, Equatable, Identifiable, Sendable {
         return .app
     }
 
-    public static func classify(_ identity: ActivityIdentity, using rules: [Rule]) -> Classification {
+    public static func classify(_ identity: ActivityIdentity, using rules: [Rule],
+                                fallbackBasis: ClassificationBasis = .none) -> Classification {
         let rule = rules.filter { $0.valid && $0.match(identity) }
             .reduce(nil as Rule?) { previous, next in
                 guard let previous else { return next }
@@ -128,7 +129,7 @@ public struct Rule: Codable, Equatable, Identifiable, Sendable {
             appName: identity.appName,
             host: identity.host,
             ruleID: rule?.id,
-            basis: rule?.basis ?? automatic?.basis ?? .none
+            basis: rule?.basis ?? automatic?.basis ?? fallbackBasis
         )
     }
 }
@@ -153,6 +154,7 @@ public enum Privacy {
 public enum ClassificationBasis: String, Codable, Sendable {
     case app, window, domain, path, project, none
     case automaticApp, applicationCategory, automaticDomain, automaticPath, automaticWindow
+    case browserDisconnected, browserPageUnavailable
 }
 
 public struct Classification: Codable, Equatable, Sendable {

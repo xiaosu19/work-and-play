@@ -92,33 +92,48 @@ final class SQLiteStoreTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("history.sqlite3").path
-        let store = try SQLiteStore(path: file)
+        _ = try SQLiteStore(path: file)
         let seed = Process()
         seed.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         seed.arguments = [file, """
+            DROP VIEW reported_slice;
+            CREATE VIEW reported_slice AS SELECT id, 'entertainment' AS bucket FROM slice;
             INSERT INTO slice(start,end,day,time_zone,span,category,bucket,app_id,app_name,kind,basis,corrected)
             VALUES (100,110,'2026-11-25','UTC','a','unclassified','review','com.netease.163music','Music','interactive','none',0),
                    (110,120,'2026-11-25','UTC','b','unclassified','review','com.netease.163music','Music','interactive','none',1),
                    (120,130,'2026-11-25','UTC','c','unclassified','review','com.netease.163music','Music','interactive','app',0),
-                   (130,140,'2026-11-25','UTC','d','unclassified','review','com.microsoft.edgemac','Edge','interactive','none',0);
+                   (130,140,'2026-11-25','UTC','d','unclassified','review','com.microsoft.edgemac','Edge','interactive','none',0),
+                   (140,150,'2026-11-25','UTC','e','unclassified','review','com.google.Chrome','Chrome','interactive','browserDisconnected',0),
+                   (150,160,'2026-11-25','UTC','f','unclassified','review','com.microsoft.edgemac','Edge','interactive','browserPageUnavailable',0),
+                   (160,170,'2026-11-25','UTC','g','work','regular','com.microsoft.edgemac','Edge','interactive','app',0),
+                   (170,180,'2026-11-25','UTC','h','entertainment','entertainment','com.google.Chrome','Chrome','interactive','app',1);
+            INSERT INTO slice(start,end,day,time_zone,span,category,bucket,app_id,app_name,host,kind,basis)
+            VALUES (180,190,'2026-11-25','UTC','i','unclassified','review','com.google.Chrome','Chrome','unknown.example','interactive','none');
             """]
         try seed.run()
         seed.waitUntilExit()
         expect(seed.terminationStatus == 0)
+        let store = try SQLiteStore(path: file)
         try store.classifyExistingUnknownSources()
         try store.classifyExistingUnknownSources()
         let rows = try store.report(day: "2026-11-25").entries
-        expect(rows.map(\.bucket) == [.entertainment, .entertainment, .entertainment, .entertainment])
-        expect(rows.map(\.basis) == [.automaticApp, .none, .app, .none])
+        expect(rows.map(\.bucket) == [.entertainment, .entertainment, .entertainment, .review, .review,
+                                       .review, .regular, .entertainment, .entertainment])
+        expect(rows.map(\.basis) == [.automaticApp, .none, .app, .none, .browserDisconnected,
+                                      .browserPageUnavailable, .app, .app, .none])
         let total = try store.totals(from: "2026-11-25", through: "2026-11-25")
-        expect(total.count == 1 && total.first?.bucket == .entertainment && total.first?.duration == 40)
+        expect(total.count == 3 && total.first(where: { $0.bucket == .entertainment })?.duration == 50)
+        expect(total.first(where: { $0.bucket == .review })?.duration == 30)
         let grouped = try store.sourceTotals(from: "2026-11-25", through: "2026-11-25", bucket: .entertainment)
-        expect(grouped.map(\.count) == [3, 1])
+        expect(grouped.map(\.count) == [3, 1, 1])
         let detail = try store.report(from: "2026-11-25", through: "2026-11-25", bucket: .entertainment)
-        expect(detail.entries.count == 4)
-        expect(rows.map(\.duration) == [10, 10, 10, 10])
+        expect(detail.entries.count == 5)
+        expect(rows.count == 9 && rows.allSatisfy { $0.duration == 10 })
         expect(rows.first?.basis == .automaticApp)
         expect(rows[1].corrected)
+        try store.correct(entry: rows[3], to: .work)
+        let corrected = try store.report(day: "2026-11-25")
+        expect(corrected.total(.regular) == 20 && corrected.total(.review) == 20)
     }
 
     func testSavedScheduleDoesNotRecategorizeExistingTime() throws {

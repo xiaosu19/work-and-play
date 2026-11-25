@@ -138,15 +138,23 @@ public final class SQLiteStore {
             try run("CREATE INDEX IF NOT EXISTS slice_day ON slice(day, start)")
             try run("CREATE INDEX IF NOT EXISTS slice_end ON slice(end)")
             try run("CREATE INDEX IF NOT EXISTS slice_website_day ON slice(day, host, visit_id) WHERE host IS NOT NULL")
-            // Project earlier unknown activity into the current two-category report without rewriting the ledger.
-            try run("""
-                CREATE VIEW IF NOT EXISTS reported_slice AS
-                SELECT id, start, end, day, time_zone,
-                    CASE category WHEN 'unclassified' THEN 'entertainment' ELSE category END AS category,
-                    CASE bucket WHEN 'review' THEN 'entertainment' ELSE bucket END AS bucket,
-                    rest_reason, app_id, app_name, host, kind, rule_id, basis, corrected
-                FROM slice
-                """)
+            // Rebuild the projection when opening older stores; the original fragments stay intact.
+            try transaction {
+                try run("DROP VIEW IF EXISTS reported_slice")
+                try run("""
+                    CREATE VIEW reported_slice AS
+                    SELECT id, start, end, day, time_zone,
+                        CASE WHEN category = 'unclassified' AND NOT missing_browser_page
+                             THEN 'entertainment' ELSE category END AS category,
+                        CASE WHEN bucket = 'review' AND NOT missing_browser_page
+                             THEN 'entertainment' ELSE bucket END AS bucket,
+                        rest_reason, app_id, app_name, host, kind, rule_id, basis, corrected
+                    FROM (
+                        SELECT slice.*, host IS NULL AND lower(app_id) IN ('com.google.chrome', 'com.microsoft.edgemac')
+                            AS missing_browser_page FROM slice
+                    )
+                    """)
+            }
         } catch {
             sqlite3_close(db)
             throw error

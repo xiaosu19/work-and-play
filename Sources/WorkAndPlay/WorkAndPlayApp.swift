@@ -46,6 +46,7 @@ private struct MenuLabel: View {
         if tracker.status.hasPrefix(Bucket.regular.title) { return "briefcase" }
         if tracker.status.hasPrefix(Bucket.overtime.title) { return "clock.badge.exclamationmark" }
         if tracker.status.hasPrefix(Bucket.entertainment.title) { return "play.circle" }
+        if tracker.status.hasPrefix(Bucket.review.title) { return Bucket.review.symbol }
         if tracker.status == "休息中" { return "moon" }
         return "clock"
     }
@@ -98,12 +99,14 @@ extension ActivityKind {
 
 extension Bucket {
     static let displayCases: [Self] = [.regular, .overtime, .entertainment]
+    static let reportCases = displayCases + [.review]
 
     var title: String {
         switch self {
         case .regular: "普通工时"
         case .overtime: "加班"
-        case .entertainment, .review: "摸鱼"
+        case .entertainment: "摸鱼"
+        case .review: "网页未识别"
         }
     }
 

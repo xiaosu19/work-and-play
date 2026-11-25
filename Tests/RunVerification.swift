@@ -39,7 +39,7 @@ struct RunVerification {
             ("夏令时切换的 23 与 25 小时日界", engine.testDaylightSavingUsesElapsedHours),
             ("SQLite 隐私、总数、修正与重开", store.testPrivacyTotalsCorrectionAndRestart),
             ("SQLite 连续片段合并与重复写入", store.testCheckpointsMergeOnlyContiguousSpans),
-            ("旧记录按二分类汇总并保留识别依据", store.testHistoricalAutomaticClassificationPreservesOverrides),
+            ("网页未识别单列、旧库视图迁移与历史修正", store.testHistoricalAutomaticClassificationPreservesOverrides),
             ("排班保存重开与修改仅作用于新片段", store.testSavedScheduleDoesNotRecategorizeExistingTime),
             ("跨日期报表、分类分页与来源汇总", store.testReportRangeTotalsPagingAndSources),
             ("同一网站按工作和摸鱼汇总", store.testMixedSiteShowsWorkEntertainmentAndReview),

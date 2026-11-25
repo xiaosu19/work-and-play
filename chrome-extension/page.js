@@ -7,7 +7,12 @@
   const navigationKeys = new Set(["PageDown", "PageUp", "Home", "End", "ArrowDown", "ArrowUp", "Space"]);
   const scrollPositions = new WeakMap();
   const playback = new WeakMap();
-  if (document.scrollingElement) scrollPositions.set(document.scrollingElement, document.scrollingElement.scrollTop);
+  function rememberScrollRoot() {
+    const root = document.scrollingElement;
+    if (root && !scrollPositions.has(root)) scrollPositions.set(root, root.scrollTop);
+  }
+  rememberScrollRoot();
+  document.addEventListener("DOMContentLoaded", rememberScrollRoot, { once: true });
   let path = location.pathname;
   let readingAt = null;
   let interactionAt = null;
@@ -16,8 +21,8 @@
   let lastScrollAt = 0;
   let watchingVideo = false;
 
-  function notify() {
-    void chrome.runtime.sendMessage({ type: "page-signal" }).catch(() => {});
+  function notify(type = "page-signal") {
+    void chrome.runtime.sendMessage({ type }).catch(() => {});
   }
 
   function syncPath() {
@@ -156,5 +161,5 @@
     }
     reply({ document: documentID, host, path, readingAt, interactionAt, videoPlaying });
   });
-  notify();
+  notify("page-ready");
 })();

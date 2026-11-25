@@ -209,6 +209,10 @@ final class TimeEngineTests {
         expect(classify("test.music", appCategory: "public.app-category.music").category == .unclassified)
         let edge = "com.microsoft.edgemac"
         expect(classify(edge).category == .unclassified)
+        let missingPage = ActivityIdentity(appID: edge, appName: "Edge")
+        expect(Rule.classify(missingPage, using: [], fallbackBasis: .browserDisconnected).basis == .browserDisconnected)
+        let edgeRule = Rule(appID: edge, category: .work)
+        expect(Rule.classify(missingPage, using: [edgeRule], fallbackBasis: .browserPageUnavailable).basis == .app)
         expect(classify("com.openai.codex").category == .work)
         expect(classify("com.openai.chat").category == .work)
         expect(classify(edge, host: "chatgpt.com").basis == .automaticDomain)

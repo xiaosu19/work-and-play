@@ -266,10 +266,12 @@ final class Tracker: ObservableObject {
         let feed = browser.flatMap { feeds[$0] }
         let usableFeed = feed?.isConnected(at: now) == true
         let page = usableFeed ? feed?.latest?.page : nil
+        let missingPageBasis: ClassificationBasis? = browser != nil && page == nil
+            ? (usableFeed ? .browserPageUnavailable : .browserDisconnected) : nil
         let identity = ActivityIdentity(appID: appID, appName: appName, window: window?.title,
                                         host: page.flatMap { Privacy.host($0.host) }, path: page?.path,
                                         appCategory: declaredCategory(of: app))
-        let decision = Rule.classify(identity, using: preferences.rules)
+        let decision = Rule.classify(identity, using: preferences.rules, fallbackBasis: missingPageBasis ?? .none)
         let token: String
         if let page {
             token = "\(pid)/\(page.tab)/\(page.document)/\(page.path)"
@@ -319,7 +321,10 @@ final class Tracker: ObservableObject {
         let bucket = preferences.schedule.activeBucket(for: decision.category, at: now, calendar: calendar)
         let activity: String
         if !engine.active(at: now) { activity = "等待互动" }
-        else if let bucket { activity = "\(bucket.title) · \(decision.label)" }
+        else if let bucket {
+            let reportedBucket: Bucket = bucket == .review && missingPageBasis == nil ? .entertainment : bucket
+            activity = "\(reportedBucket.title) · \(decision.label)"
+        }
         else { activity = "休息中" }
         setStatus(activity, accuracy)
         if changed { flush() } else { checkpoint(uptime) }

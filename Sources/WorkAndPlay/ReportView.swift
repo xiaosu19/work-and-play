@@ -50,7 +50,13 @@ struct ReportView: View {
                         }
                     }
 
-                    ActivityChart(period: period, anchor: date, totals: totals, entries: timeline)
+                    ActivityChart(period: period, anchor: date, totals: totals, entries: timeline) {
+                        filter = .review
+                        setMode(.entries)
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.24)) {
+                            scroll.scrollTo(detailsID, anchor: .top)
+                        }
+                    }
                     if let error = tracker.errorMessage {
                         Label(error, systemImage: "exclamationmark.circle")
                             .foregroundStyle(.red)
@@ -145,7 +151,7 @@ struct ReportView: View {
             if mode == .sources || mode == .entries {
                 HStack(spacing: 5) {
                     filterChip(nil)
-                    ForEach(Bucket.displayCases) { filterChip($0) }
+                    ForEach(Bucket.reportCases) { filterChip($0) }
                     Spacer(minLength: 6)
                     if mode == .entries && pageCount > 1 {
                         Button { page -= 1; loadDetails() } label: { Image(systemName: "chevron.left") }
@@ -556,6 +562,8 @@ private extension ClassificationBasis {
         case .automaticDomain: "自动识别 · 网站"
         case .automaticPath: "自动识别 · 网页用途"
         case .automaticWindow: "自动识别 · 窗口"
+        case .browserDisconnected: "当时扩展未连接"
+        case .browserPageUnavailable: "当时网页未提供信号"
         case .none: "未识别到工作线索"
         }
     }

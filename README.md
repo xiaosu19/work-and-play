@@ -11,7 +11,7 @@
 
 系统要求为 **macOS 14 或更新版本**。下载包包含 Apple 芯片与 Intel 架构。
 
-1. 从 [GitHub Releases](https://github.com/xiaosu19/work-and-play/releases/latest) 下载 `WorkAndPlay-1.0.0-universal.zip` 并解压。
+1. 从 [GitHub Releases](https://github.com/xiaosu19/work-and-play/releases/latest) 下载通用安装包，例如 `WorkAndPlay-1.0.1-universal.zip`，然后解压。
 2. 把 `WorkAndPlay.app` 拖到 Finder 的「应用程序」，双击打开。保留同包的 `install-chrome-host.sh`，安装浏览器扩展时会用到。
 3. 打开「设置 → 休息排班 → 按上下班设置」，填写上班、午休开始和结束、下班时间，选择应用到哪些星期。多段休息、全天休息和个别日期的临时排班也可以单独设置。
 
@@ -28,7 +28,7 @@ App 单独运行即可按应用名称计时。接入网页统计需要完成**�
 在终端进入解压后的目录，运行以下命令。如果 App 放在其他位置，最后一个参数换成实际完整路径。脚本给当前 macOS 用户注册连接器，无需 `sudo`。
 
 ```sh
-cd ~/Downloads/WorkAndPlay-1.0.0
+cd ~/Downloads/WorkAndPlay-1.0.1
 bash ./install-chrome-host.sh /Applications/WorkAndPlay.app
 ```
 
@@ -57,7 +57,7 @@ bash ./install-chrome-host.sh /Applications/WorkAndPlay.app
 2. 在「网站统计」选择「设为 → 设为工作」或「设为摸鱼」，即可为未来访问保存规则。填写 `*.example.com` 或 `*example.com` 可覆盖 `example.com` 及其子域名。更具体的路径、窗口或项目条件可以在「设置 → 分类规则」里配置。
 3. 在「时间片段」点击「修正」可以改一条已有记录。网站分类规则从新的有效活动开始生效，报表上的历史时长按片段原有分类汇总。
 
-工时簿按已知 App、网站和可用窗口信号自动分类。普通时段的未知活动按当前报表口径计入摸鱼，片段会标明识别依据。浏览器只提供应用名时，条目会标出「当时未取得网页信息」。
+工时簿按已知 App、网站和可用窗口信号自动分类。只取得 Chrome 或 Edge 应用名且无法判断用途的片段会单列为「网页未识别」。在时间图或活动明细可以查看这些片段，新记录会标出扩展是否连接。报表里的普通工时、加班和摸鱼总数分别统计已入各自分类的片段。
 
 | 场景 | 默认计时方式 |
 | --- | --- |

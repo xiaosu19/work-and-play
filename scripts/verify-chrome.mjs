@@ -44,7 +44,11 @@ async function waitFor(description, check, limit = 12000) {
 
 const fixture = createServer((req, res) => {
   res.setHeader("content-type", "text/html; charset=utf-8");
-  if (req.url.startsWith("/work")) {
+  if (req.url.startsWith("/delayed")) {
+    res.write('<!doctype html><title>Loading fixture</title><main>Visible before the response finishes');
+    const finish = setTimeout(() => res.end('</main>'), 15000);
+    res.on("close", () => clearTimeout(finish));
+  } else if (req.url.startsWith("/work")) {
     res.end('<!doctype html><title>browser-fixture-private-title</title><main style="height:8000px">Reading fixture</main>');
   } else {
     res.end(`<title>Motion fixture</title><video autoplay muted playsinline style="width:480px;height:270px"></video>
@@ -139,24 +143,55 @@ try {
     return Number(activate(browserPID)) === browserPID;
   }
   await waitFor(`the isolated ${browserName} window gained macOS focus`, focusTestWindow);
-  await cdp("Page.navigate", {url:url+"/work?ticket=fixture-query-secret#fixture-fragment"}, ps);
   let lastRefocus = 0;
-  async function snapshot() {
-    const result = await evaluate(ws, "ownedFocus && activeTab !== undefined ? chrome.tabs.sendMessage(activeTab,{type:'snapshot'},{frameId:0}).catch(()=>null) : null");
-    if (result == null && Date.now() - lastRefocus > 1200) {
+  async function recoverFocus() {
+    if (Date.now() - lastRefocus > 1200) {
       lastRefocus = Date.now();
       await focusTestWindow();
     }
+  }
+  await cdp("Page.navigate", {url:url+"/delayed"}, ps);
+  await waitFor("committed foreground document provides a snapshot before the page finishes loading", async () => {
+    const available = await evaluate(ws, `(async () => {
+      if (!ownedFocus || !pageAvailable || activeTab === undefined) return false;
+      const tab = await chrome.tabs.get(activeTab);
+      const target = snapshotTarget(tab);
+      if (tab.status !== 'loading' || !target?.documentId) return false;
+      const page = await chrome.tabs.sendMessage(tab.id, {type:'snapshot'}, target).catch(() => null);
+      return page?.path === '/delayed';
+    })()`);
+    if (!available) await recoverFocus();
+    return available;
+  }).catch(async error => {
+    const state = await evaluate(ws, `(async () => {
+      const tab = activeTab === undefined ? null : await chrome.tabs.get(activeTab).catch(() => null);
+      return { ownedFocus, pageAvailable, status: tab?.status, loadingDocument: loadingDocuments.has(activeTab) };
+    })()`);
+    const pageState = await evaluate(ps, "({ readyState: document.readyState, visibility: document.visibilityState })");
+    console.log("Loading fixture at timeout:", { state, pageState });
+    throw error;
+  });
+  await cdp("Page.navigate", {url:url+"/work?ticket=fixture-query-secret#fixture-fragment"}, ps);
+  async function snapshot() {
+    const result = await evaluate(ws, "ownedFocus && activeTab !== undefined ? chrome.tabs.sendMessage(activeTab,{type:'snapshot'},{frameId:0}).catch(()=>null) : null");
+    if (result == null) await recoverFocus();
     return result;
   }
-  await waitFor("verified foreground tab from content script", async () => (await snapshot())?.path === "/work");
-  await evaluate(ps, "window.scrollTo(0,450); true");
-  await delay(800);
+  const beforeProgrammaticScroll = await waitFor("verified foreground tab from content script", async () => {
+    const state = await snapshot();
+    return state?.path === "/work" ? state : null;
+  });
+  await evaluate(ps, "new Promise(resolve => { window.scrollTo(0,450); requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))); })");
   const afterProgrammaticScroll = await waitFor("content script remains reachable after programmatic scroll", snapshot);
-  if (afterProgrammaticScroll.readingAt !== null) throw new Error("Script-initiated scroll renewed reading");
-  if (afterProgrammaticScroll.interactionAt !== null) throw new Error("Script-initiated scroll was treated as foreground input");
+  if (afterProgrammaticScroll.readingAt !== beforeProgrammaticScroll.readingAt) throw new Error("Script-initiated scroll renewed reading");
+  if ((afterProgrammaticScroll.interactionAt ?? 0) > (beforeProgrammaticScroll.interactionAt ?? 0)) {
+    throw new Error("Script-initiated scroll was treated as foreground input");
+  }
   await cdp("Input.dispatchMouseEvent", {type:"mouseWheel",x:210,y:240,deltaX:0,deltaY:580}, ps);
-  const firstReading = await waitFor("trusted scroll renews reading", async () => (await snapshot())?.readingAt);
+  const firstReading = await waitFor("trusted scroll renews reading", async () => {
+    const at = (await snapshot())?.readingAt;
+    return at > (afterProgrammaticScroll.readingAt ?? 0) ? at : null;
+  });
   await waitFor("trusted foreground input is reported without keys or contents", async () => {
     const state = await snapshot();
     return Number.isFinite(state?.interactionAt) && Object.keys(state).sort().join(",") ===

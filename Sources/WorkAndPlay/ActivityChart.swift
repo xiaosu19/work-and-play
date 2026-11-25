@@ -7,6 +7,7 @@ struct ActivityChart: View {
     let anchor: Date
     let totals: [ReportTotal]
     let entries: [ReportEntry]
+    let showMissingWebsites: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -19,7 +20,7 @@ struct ActivityChart: View {
                 Text("记录合计 \(durationText(tracked))")
                     .font(.system(size: 12, weight: .medium).monospacedDigit())
                     .foregroundStyle(Color.workMuted)
-                    .help("合计包括普通工时、加班和摸鱼。")
+                    .help("合计包括普通工时、加班、摸鱼和网页未识别时长。")
             }
 
             if period == .day {
@@ -30,11 +31,15 @@ struct ActivityChart: View {
 
             HStack(spacing: 15) {
                 ForEach(Bucket.displayCases) { bucket in
-                    HStack(spacing: 5) {
-                        Circle().fill(bucket.color).frame(width: 7, height: 7)
-                            .accessibilityHidden(true)
-                        Text(bucket.title)
+                    legend(bucket, title: bucket.title)
+                }
+                let missingWebsites = totals.lazy.filter { $0.bucket == .review }.reduce(0) { $0 + $1.duration }
+                if missingWebsites > 0 {
+                    Button(action: showMissingWebsites) {
+                        legend(.review, title: "网页未识别 \(durationText(missingWebsites))")
                     }
+                    .buttonStyle(.plain)
+                    .help("查看只记录到浏览器的片段")
                 }
                 Spacer(minLength: 4)
             }
@@ -43,6 +48,13 @@ struct ActivityChart: View {
         }
         .padding(17)
         .workCard()
+    }
+
+    private func legend(_ bucket: Bucket, title: String) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(bucket.color).frame(width: 7, height: 7).accessibilityHidden(true)
+            Text(title)
+        }
     }
 }
 
@@ -187,7 +199,7 @@ private struct TrendChart: View {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 VStack(spacing: 0) {
-                    ForEach(Bucket.displayCases.reversed()) { bucket in
+                    ForEach(Bucket.reportCases.reversed()) { bucket in
                         if let amount = column.amounts[bucket], amount > 0 {
                             Rectangle().fill(bucket.color)
                                 .frame(height: max(1, plotHeight * amount / ceiling))
@@ -209,7 +221,7 @@ private struct TrendChart: View {
         .padding(.top, 4)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(column.id)
-        .accessibilityValue(Bucket.displayCases.compactMap {
+        .accessibilityValue(Bucket.reportCases.compactMap {
             guard let amount = column.amounts[$0], amount > 0 else { return nil }
             return "\($0.title) \(durationText(amount))"
         }.joined(separator: "，"))
