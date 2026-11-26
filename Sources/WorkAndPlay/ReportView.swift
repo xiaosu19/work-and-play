@@ -14,13 +14,14 @@ struct ReportView: View {
     @State private var source: SourceTotal?
     @State private var page = 0
     @State private var totals: [ReportTotal] = []
-    @State private var timeline: [ReportEntry] = []
+    @State private var timeline = DailyReport()
     @State private var entries: [ReportEntry] = []
     @State private var sources: [SourceTotal] = []
     @State private var breakdown: [SourceBreakdown] = []
     @State private var websites: [WebsiteTotal] = []
     @State private var ruleSource: SourceBreakdown?
     @State private var websiteRule: Rule?
+    @State private var applicationRule: ApplicationRuleEdit?
     @State private var editing: ReportEntry?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -50,7 +51,7 @@ struct ReportView: View {
                         }
                     }
 
-                    ActivityChart(period: period, anchor: date, totals: totals, entries: timeline) {
+                    ActivityChart(period: period, anchor: date, totals: totals, report: timeline, schedule: tracker.preferences.schedule) {
                         filter = .review
                         setMode(.entries)
                         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.24)) {
@@ -88,7 +89,11 @@ struct ReportView: View {
         }
         .sheet(item: $websiteRule) { rule in
             RuleEditor(tracker: tracker, rule: rule,
-                       guidance: "保存后适用于 Chrome 和 Edge 的新记录。更具体的规则优先。", websiteOnly: true)
+                       guidance: "保存后适用于 Chrome 和 Edge 的新记录。更具体的规则优先。", scope: .website)
+        }
+        .sheet(item: $applicationRule) { item in
+            RuleEditor(tracker: tracker, rule: item.rule,
+                       guidance: "应用于 \(item.appName) 的新记录。网站、路径或窗口等更具体的规则优先。", scope: .application)
         }
     }
 
@@ -144,7 +149,7 @@ struct ReportView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 330)
+                .frame(width: 415)
             }
             .padding(.bottom, 13)
 
@@ -199,20 +204,22 @@ struct ReportView: View {
             switch mode {
             case .entries: fragmentRows(scroll)
             case .sources: sourceRows
+            case .applications:
+                ClassificationAnalysis(sources: breakdown, mode: .applications(rules: tracker.preferences.rules.filter(\.isApplicationOnly),
+                    classify: { item, category in
+                        guard let appID = item.id.appID else { return }
+                        applicationRule = ApplicationRuleEdit(appName: item.total.appName,
+                            rule: tracker.suggestedRule(forApplication: appID, category: category))
+                    }), showEntries: { showEntries(for: $0.total) })
             case .websites:
                 WebsiteStatistics(websites: websites, rules: tracker.preferences.rules.filter(\.isWebsiteOnly), showEntries: { website in
-                    filter = nil
-                    source = website.source
-                    setMode(.entries, keepSource: true)
+                    showEntries(for: website.source)
                 }, classify: { website, category in
                     websiteRule = tracker.suggestedRule(forWebsite: website.id, category: category)
                 })
             case .analysis:
-                ClassificationAnalysis(sources: breakdown, addRule: { ruleSource = $0 }, showEntries: { item in
-                    filter = nil
-                    source = item.total
-                    setMode(.entries, keepSource: true)
-                })
+                ClassificationAnalysis(sources: breakdown, mode: .allSources(addRule: { ruleSource = $0 }),
+                                       showEntries: { showEntries(for: $0.total) })
             }
         }
         .padding(17)
@@ -314,7 +321,8 @@ struct ReportView: View {
     }
 
     private func browserWithoutPage(_ item: SourceTotal) -> BrowserSource? {
-        item.id.host == nil ? item.id.appID.flatMap(BrowserSource.init(rawValue:)) : nil
+        guard case let .application(id, host) = item.id, host == nil else { return nil }
+        return BrowserSource(rawValue: id)
     }
 
     private func sourceSubtitle(_ item: SourceTotal, count: String) -> String {
@@ -349,6 +357,12 @@ struct ReportView: View {
 
     private func setMode(_ next: DetailMode) { setMode(next, keepSource: false) }
 
+    private func showEntries(for total: SourceTotal) {
+        filter = nil
+        source = total
+        setMode(.entries, keepSource: true)
+    }
+
     private func setMode(_ next: DetailMode, keepSource: Bool) {
         mode = next
         page = 0
@@ -358,11 +372,13 @@ struct ReportView: View {
 
     private func load() {
         totals = tracker.totals(dayRange: days)
-        timeline = period == .day ? tracker.report(dayRange: days).entries : []
+        timeline = period == .day ? tracker.report(dayRange: days) : DailyReport()
         if let current = source {
             switch current.id {
             case .application:
                 source = tracker.sourceTotals(dayRange: days, bucket: filter).first { $0.id == current.id }
+            case .entireApplication:
+                source = tracker.sourceBreakdown(dayRange: days, groupByApplication: true).first { $0.id == current.id }?.total
             case .website(let host):
                 source = tracker.websiteTotals(dayRange: days).first { $0.id == host }?.source
             }
@@ -380,8 +396,8 @@ struct ReportView: View {
             sources = tracker.sourceTotals(dayRange: days, bucket: filter)
         case .websites:
             websites = tracker.websiteTotals(dayRange: days)
-        case .analysis:
-            breakdown = tracker.sourceBreakdown(dayRange: days)
+        case .analysis, .applications:
+            breakdown = tracker.sourceBreakdown(dayRange: days, groupByApplication: mode == .applications)
         }
     }
 
@@ -394,6 +410,12 @@ struct ReportView: View {
     }
 }
 
+private struct ApplicationRuleEdit: Identifiable {
+    let appName: String
+    let rule: Rule
+    var id: UUID { rule.id }
+}
+
 private struct ReportSelection: Equatable {
     let period: ReportPeriod
     let days: ClosedRange<String>
@@ -402,6 +424,7 @@ private struct ReportSelection: Equatable {
 private enum DetailMode: String, CaseIterable, Identifiable {
     case entries = "时间片段"
     case sources = "应用与网站"
+    case applications = "应用统计"
     case websites = "网站统计"
     case analysis = "分类分析"
     var id: Self { self }
@@ -409,7 +432,7 @@ private enum DetailMode: String, CaseIterable, Identifiable {
     var heading: String {
         switch self {
         case .entries, .sources: "活动明细"
-        case .websites, .analysis: rawValue
+        case .applications, .websites, .analysis: rawValue
         }
     }
 }
@@ -528,7 +551,8 @@ private struct FragmentRow: View {
     private var metadata: String {
         let date = showDate ? entry.day : nil
         let zone = entry.timeZoneID == TimeZone.current.identifier ? nil : entry.timeZoneID
-        return [date, entry.bucket.title, entry.kind.title, entry.host == nil ? nil : entry.appName,
+        return [date, entry.bucket.title, entry.basis.isIdle ? nil : entry.kind.title,
+                entry.host == nil ? nil : entry.appName,
                 classificationDetail, entry.restReason, zone]
             .compactMap { $0 }.joined(separator: " · ")
     }
@@ -564,6 +588,9 @@ private extension ClassificationBasis {
         case .automaticWindow: "自动识别 · 窗口"
         case .browserDisconnected: "当时扩展未连接"
         case .browserPageUnavailable: "当时网页未提供信号"
+        case .deviceIdle: "超过空闲上限"
+        case .screenLocked: "锁屏空闲"
+        case .systemSleeping: "睡眠空闲"
         case .none: "未识别到工作线索"
         }
     }
@@ -596,8 +623,10 @@ private struct CorrectionView: View {
                 Text("休息时段只保留工作。保存后这条片段会被删除。")
                     .foregroundStyle(.secondary)
             }
-            Toggle("同时保存为未来规则", isOn: $saveRule)
-            if saveRule { RuleFields(rule: $rule, showCategory: false) }
+            if !entry.basis.isIdle {
+                Toggle("同时保存为未来规则", isOn: $saveRule)
+                if saveRule { RuleFields(rule: $rule, showCategory: false) }
+            }
             if let error = tracker.errorMessage { Text(error).foregroundStyle(.red) }
             HStack {
                 Spacer()

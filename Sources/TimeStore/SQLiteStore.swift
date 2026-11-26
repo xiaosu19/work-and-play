@@ -38,6 +38,32 @@ public struct DailyReport {
     public func total(_ bucket: Bucket) -> TimeInterval {
         entries.lazy.filter { $0.bucket == bucket }.reduce(0) { $0 + $1.duration }
     }
+
+    public func unrecordedOrdinaryIntervals(schedule: Schedule) -> [DateInterval] {
+        let sorted = entries.sorted { $0.start < $1.start }
+        guard let first = sorted.first, let end = sorted.map(\.end).max(), first.start < end,
+              sorted.allSatisfy({ $0.day == first.day && $0.timeZoneID == first.timeZoneID }),
+              let zone = TimeZone(identifier: first.timeZoneID) else { return [] }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let ordinaryIntervals = schedule.ordinaryIntervals(within: DateInterval(start: first.start, end: end), calendar: calendar)
+        var recordedThrough = first.end
+        var gaps: [DateInterval] = []
+        for entry in sorted.dropFirst() {
+            if recordedThrough < entry.start {
+                for interval in ordinaryIntervals {
+                    let start = max(recordedThrough, interval.start)
+                    let end = min(entry.start, interval.end)
+                    if start < end {
+                        gaps.append(DateInterval(start: start, end: end))
+                    }
+                }
+            }
+            recordedThrough = max(recordedThrough, entry.end)
+        }
+        return gaps
+    }
 }
 
 public struct ReportTotal {
@@ -49,16 +75,20 @@ public struct ReportTotal {
 
 public enum ReportSource: Hashable {
     case application(String, host: String?)
+    case entireApplication(String)
     case website(String)
 
     public var appID: String? {
-        if case let .application(id, _) = self { return id }
-        return nil
+        switch self {
+        case .application(let id, _), .entireApplication(let id): id
+        case .website: nil
+        }
     }
 
     public var host: String? {
         switch self {
         case let .application(_, host): host
+        case .entireApplication: nil
         case let .website(host): host
         }
     }
@@ -244,17 +274,25 @@ public final class SQLiteStore {
         try sourceBreakdown(from: firstDay, through: lastDay, bucket: bucket).map(\.total)
     }
 
-    public func sourceBreakdown(from firstDay: String, through lastDay: String, bucket: Bucket? = nil) throws -> [SourceBreakdown] {
-        let filter = Self.reportFilter(firstDay: firstDay, lastDay: lastDay, bucket: bucket, source: nil)
+    public func sourceBreakdown(from firstDay: String, through lastDay: String, bucket: Bucket? = nil,
+                                groupByApplication: Bool = false) throws -> [SourceBreakdown] {
+        var filter = Self.reportFilter(firstDay: firstDay, lastDay: lastDay, bucket: bucket, source: nil)
+        if groupByApplication {
+            filter.condition += " AND app_id <> ?"
+            filter.values.append(.text(Classification.deviceIdle.appID))
+        }
+        let hostColumn = groupByApplication ? "NULL" : "host"
+        let grouping = groupByApplication ? "app_id, bucket" : "app_id, host, bucket"
         let rows = try query("""
-            SELECT app_id, host, MIN(app_name), SUM(end-start), COUNT(*), bucket FROM reported_slice WHERE \(filter.condition)
-            GROUP BY app_id, host, bucket
+            SELECT app_id, \(hostColumn), MIN(app_name), SUM(end-start), COUNT(*), bucket
+            FROM reported_slice WHERE \(filter.condition) GROUP BY \(grouping)
             """, filter.values) { row -> (source: SourceTotal, bucket: Bucket) in
                 guard let appID = string(row, 0), let appName = string(row, 2),
                       let bucket = string(row, 5).flatMap(Bucket.init(rawValue:)) else {
                     throw StoreError.sqlite(SQLITE_CORRUPT)
                 }
-                let source = SourceTotal(id: .application(appID, host: string(row, 1)), appName: appName,
+                let identity: ReportSource = groupByApplication ? .entireApplication(appID) : .application(appID, host: string(row, 1))
+                let source = SourceTotal(id: identity, appName: appName,
                                          duration: sqlite3_column_double(row, 3), count: Int(sqlite3_column_int64(row, 4)))
                 return (source, bucket)
             }
@@ -300,6 +338,9 @@ public final class SQLiteStore {
         case let .application(appID, host):
             condition += " AND app_id = ? AND host IS ?"
             values += [.text(appID), .optional(host)]
+        case let .entireApplication(appID):
+            condition += " AND app_id = ?"
+            values.append(.text(appID))
         case let .website(host):
             condition += " AND host = ?"
             values.append(.text(host))

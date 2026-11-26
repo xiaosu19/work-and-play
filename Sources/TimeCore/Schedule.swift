@@ -80,6 +80,13 @@ public struct Schedule: Equatable, Codable, Sendable {
         Bucket.forCategory(category, restReason: activeRestPeriod(at: date, calendar: calendar)?.description)
     }
 
+    public func ordinaryIntervals(within interval: DateInterval, calendar: Calendar) -> [DateInterval] {
+        split(interval, calendar: calendar).compactMap { range in
+            guard range.restReason == nil else { return nil }
+            return DateInterval(start: range.start, end: range.end)
+        }
+    }
+
     func split(_ interval: DateInterval, calendar: Calendar) -> [ScheduledRange] {
         var result: [ScheduledRange] = []
         var day = calendar.startOfDay(for: interval.start)

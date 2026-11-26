@@ -68,6 +68,10 @@ public struct Rule: Codable, Equatable, Identifiable, Sendable {
         !host.isEmpty && appID.isEmpty && windowContains.isEmpty && pathPrefix.isEmpty && project.isEmpty
     }
 
+    public var isApplicationOnly: Bool {
+        !appID.isEmpty && host.isEmpty && windowContains.isEmpty && pathPrefix.isEmpty && project.isEmpty
+    }
+
     private func match(_ identity: ActivityIdentity) -> Bool {
         let page = identity.path ?? ""
         let pathMatches = pathPrefix.isEmpty || page == pathPrefix
@@ -155,9 +159,21 @@ public enum ClassificationBasis: String, Codable, Sendable {
     case app, window, domain, path, project, none
     case automaticApp, applicationCategory, automaticDomain, automaticPath, automaticWindow
     case browserDisconnected, browserPageUnavailable
+    case deviceIdle, screenLocked, systemSleeping
+
+    public var isIdle: Bool {
+        self == .deviceIdle || self == .screenLocked || self == .systemSleeping
+    }
 }
 
 public struct Classification: Codable, Equatable, Sendable {
+    public static let deviceIdle = idle(basis: .deviceIdle)
+
+    static func idle(basis: ClassificationBasis) -> Self {
+        Classification(category: .entertainment, kind: .interactive, label: "设备空闲",
+            appID: "local.workandplay.idle", appName: "设备空闲", host: nil, ruleID: nil, basis: basis)
+    }
+
     public let category: ActivityCategory
     public let kind: ActivityKind
     public let label: String

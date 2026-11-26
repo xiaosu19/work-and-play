@@ -3,6 +3,63 @@ import TimeCore
 import TimeStore
 
 final class SQLiteStoreTests {
+    func testDailyReportShowsUnrecordedTimeWithoutCountingIt() throws {
+        let store = try SQLiteStore(path: ":memory:")
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Singapore")!
+        let noon = calendar.date(from: DateComponents(year: 2026, month: 11, day: 26, hour: 12))!
+        let day = Schedule.dayKey(noon, calendar: calendar)
+        let schedule = Schedule(overrides: [day: [RestPeriod(start: 720, end: 780)]])
+        let terminal = ActivityIdentity(appID: "com.apple.Terminal", appName: "Terminal")
+        let front = Foreground(token: "terminal", classification: Rule.classify(terminal, using: []))
+        let start = noon.addingTimeInterval(-600)
+        let afterLunch = noon.addingTimeInterval(3660)
+        var engine = TimeEngine(preferences: Preferences(), calendar: calendar)
+        _ = engine.observe(at: start, Observation(foreground: front, input: start))
+        try store.append(engine.observe(at: start.addingTimeInterval(60), Observation()))
+        expect(try store.report(day: day).unrecordedOrdinaryIntervals(schedule: schedule).isEmpty)
+
+        _ = engine.observe(at: afterLunch, Observation(foreground: front, input: afterLunch))
+        try store.append(engine.observe(at: afterLunch.addingTimeInterval(60), Observation()))
+        let report = try store.report(day: day)
+        let gaps = report.unrecordedOrdinaryIntervals(schedule: schedule)
+        expect(gaps == [
+            DateInterval(start: start.addingTimeInterval(60), end: noon),
+            DateInterval(start: noon.addingTimeInterval(3600), end: afterLunch)
+        ])
+        expect(report.entries.count == 2 && report.total(.regular) == 120)
+        expect(report.total(.entertainment) == 0 && report.total(.review) == 0)
+        expect(gaps.reduce(0) { $0 + $1.duration } == 600)
+    }
+
+    func testDeviceIdleSettingAndReportAreBackwardCompatible() throws {
+        let legacy = Data(#"{"idleSeconds":3,"readingSeconds":120,"countVideo":false,"paused":false,"schedule":{"weekdays":{},"overrides":{}},"rules":[]}"#.utf8)
+        var preferences = try JSONDecoder().decode(Preferences.self, from: legacy)
+        expect(!preferences.countIdleAsEntertainment)
+        preferences.countIdleAsEntertainment = true
+        preferences.schedule.overrides["2026-11-25"] = [RestPeriod(start: 720, end: 780)]
+        let store = try SQLiteStore(path: ":memory:")
+        try store.save(preferences)
+        expect(try store.preferences() == preferences)
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Singapore")!
+        let noon = calendar.date(from: DateComponents(year: 2026, month: 11, day: 25, hour: 12))!
+        let start = noon.addingTimeInterval(-10)
+        var engine = TimeEngine(preferences: preferences, calendar: calendar)
+        _ = engine.observe(at: start, Observation(monitorsIdle: true))
+        let slices = engine.observe(at: noon.addingTimeInterval(10), Observation(monitorsIdle: true))
+        try store.append(slices)
+        try store.append(slices)
+        let rows = try store.report(day: "2026-11-25").entries
+        expect(rows.count == 1)
+        expect(rows.first?.label == Classification.deviceIdle.label && rows.first?.basis == .deviceIdle)
+        expect(rows.first?.duration == 7 && rows.first?.bucket == .entertainment && rows.first?.end == noon)
+        expect(rows.first?.host == nil && rows.first?.restReason == nil)
+        expect(try store.websiteTotals(from: "2026-11-25", through: "2026-11-25").isEmpty)
+        expect(try store.sourceBreakdown(from: "2026-11-25", through: "2026-11-25", groupByApplication: true).isEmpty)
+    }
+
     func testPrivacyTotalsCorrectionAndRestart() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -131,6 +188,11 @@ final class SQLiteStoreTests {
         expect(rows.count == 9 && rows.allSatisfy { $0.duration == 10 })
         expect(rows.first?.basis == .automaticApp)
         expect(rows[1].corrected)
+        let apps = try store.sourceBreakdown(from: "2026-11-25", through: "2026-11-25", groupByApplication: true)
+        let chrome = apps.first { $0.id == .entireApplication("com.google.Chrome") }
+        expect(chrome?.total.count == 3 && chrome?.entertainment == 20 && chrome?.byBucket[.review] == 10)
+        let chromeRows = try store.report(from: "2026-11-25", through: "2026-11-25", source: .entireApplication("com.google.Chrome")).entries
+        expect(chromeRows.count == 3 && chromeRows.contains { $0.host == "unknown.example" })
         try store.correct(entry: rows[3], to: .work)
         let corrected = try store.report(day: "2026-11-25")
         expect(corrected.total(.regular) == 20 && corrected.total(.review) == 20)

@@ -29,7 +29,7 @@ final class Tracker: ObservableObject {
     private var feeds: [BrowserSource: ChromeFeed] = [:]
     private var appCategories: [URL: String] = [:]
     private var input = DesktopInput()
-    private var lastSample: (date: Date, uptime: Double)?
+    private var lastSample: (date: Date, continuous: ContinuousClock.Instant)?
     private var lastFlushUptime: Double = 0
     private var lastSavedEnd: Date = .distantPast
     private var previousFocus: Foreground?
@@ -44,6 +44,9 @@ final class Tracker: ObservableObject {
     private var sessionInactive = false
     private var screenLocked = false
     private var disposable = false
+    private static let idleStatus = "\(Bucket.entertainment.title) · \(Classification.deviceIdle.label)"
+
+    private enum SampleEvent { case regular, sleepStarted, sleepFinished, stopping }
 
     nonisolated static var localCalendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
@@ -108,7 +111,7 @@ final class Tracker: ObservableObject {
 
     func stop() {
         guard !disposable, timer != nil else { return }
-        sample(forceSuspend: true)
+        sample(event: .stopping)
         flush()
         timer?.invalidate()
         timer = nil
@@ -153,8 +156,9 @@ final class Tracker: ObservableObject {
         (try? store?.sourceTotals(from: dayRange.lowerBound, through: dayRange.upperBound, bucket: bucket)) ?? []
     }
 
-    func sourceBreakdown(dayRange: ClosedRange<String>) -> [SourceBreakdown] {
-        (try? store?.sourceBreakdown(from: dayRange.lowerBound, through: dayRange.upperBound)) ?? []
+    func sourceBreakdown(dayRange: ClosedRange<String>, groupByApplication: Bool = false) -> [SourceBreakdown] {
+        (try? store?.sourceBreakdown(from: dayRange.lowerBound, through: dayRange.upperBound,
+                                     groupByApplication: groupByApplication)) ?? []
     }
 
     func websiteTotals(dayRange: ClosedRange<String>) -> [WebsiteTotal] {
@@ -165,6 +169,13 @@ final class Tracker: ObservableObject {
         let existing = preferences.rules.last { $0.isWebsiteOnly && $0.host.lowercased() == host }
         let defaultKind = Rule.classify(ActivityIdentity(appID: "", appName: host, host: host), using: []).kind
         var rule = existing ?? Rule(host: host, kind: defaultKind)
+        rule.category = category
+        return rule
+    }
+
+    func suggestedRule(forApplication appID: String, category: ActivityCategory) -> Rule {
+        let existing = preferences.rules.last { $0.isApplicationOnly && $0.appID.caseInsensitiveCompare(appID) == .orderedSame }
+        var rule = existing ?? Rule(appID: appID)
         rule.category = category
         return rule
     }
@@ -215,40 +226,54 @@ final class Tracker: ObservableObject {
         sample()
     }
 
-    private func sample(at now: Date = Date(), forceSuspend: Bool = false) {
+    private func sample(at now: Date = Date(), event: SampleEvent = .regular) {
+        // A delayed timer may fire before the wake notification. Wait for the observed wake boundary.
+        guard !systemSleeping || event != .regular else { return }
         let uptime = ProcessInfo.processInfo.systemUptime
+        let continuous = ContinuousClock.now
         let calendar = Self.localCalendar
         if let lastSample {
             let elapsed = now.timeIntervalSince(lastSample.date)
-            if elapsed < 0 || elapsed > 4 || abs(elapsed - (uptime - lastSample.uptime)) > 1.5
+            let delta = lastSample.continuous.duration(to: continuous).components
+            let elapsedContinuous = Double(delta.seconds) + Double(delta.attoseconds) / 1e18
+            let pairedSleep = event == .sleepFinished && engine.systemIdleReason == .sleeping
+            if elapsed < 0 || (elapsed > 4 && !pairedSleep) || abs(elapsed - elapsedContinuous) > 1.5
                 || calendar.timeZone != engine.calendar.timeZone {
                 engine.reconfigure(preferences, calendar: calendar)
                 feeds.removeAll()
                 resetInteraction(at: now)
             }
         }
-        lastSample = (now, uptime)
+        lastSample = (now, continuous)
         updateBrowserConnections(at: now)
         let signals = input.sample(at: now)
         let app = NSWorkspace.shared.frontmostApplication
         let browser = app?.bundleIdentifier.flatMap(BrowserSource.init(rawValue:))
-        let locked = Self.consoleLocked
-        if forceSuspend || screenLocked || locked || screenSleeping || sessionInactive || systemSleeping
-            || preferences.paused || now < lastSavedEnd {
-            pending += engine.observe(at: now, Observation(suspended: true))
+        let console = Self.consoleState
+        let locked = screenLocked || console.locked
+        let canRecord = event != .stopping && !preferences.paused && now >= lastSavedEnd
+            && console.active && (!sessionInactive || locked || systemSleeping)
+        if !canRecord || locked || screenSleeping || systemSleeping {
+            let reason: SystemIdleReason? = canRecord ? (systemSleeping ? .sleeping : locked ? .locked : .sleeping) : nil
+            pending += engine.observe(at: now, Observation(suspended: true, systemIdle: reason))
             resetInteraction(at: now)
-            setStatus(preferences.paused ? "已暂停" : now < lastSavedEnd ? "等待系统时钟" : "采集已挂起", precision)
+            if engine.recordingIdle(at: now), let reason {
+                setStatus("\(Bucket.entertainment.title) · \(reason == .locked ? "锁屏空闲" : "睡眠空闲")", "系统空闲")
+            } else {
+                setStatus(preferences.paused ? "已暂停" : now < lastSavedEnd ? "等待系统时钟" : "采集已挂起", precision)
+            }
             flush()
             return
         }
 
         let ax = AXIsProcessTrusted()
         if ax != accessibility { accessibility = ax }
-        guard let app, let appID = app.bundleIdentifier, appID != Bundle.main.bundleIdentifier,
-              appID != "com.apple.loginwindow" else {
-            pending += engine.observe(at: now, Observation())
+        let ownWindow = app?.bundleIdentifier != nil && app?.bundleIdentifier == Bundle.main.bundleIdentifier
+        guard let app, let appID = app.bundleIdentifier, !ownWindow, appID != "com.apple.loginwindow" else {
+            pending += engine.observe(at: now, Observation(monitorsIdle: ownWindow, deviceInput: signals.input))
             resetInteraction(at: now)
-            setStatus("等待前台活动", precision)
+            let idle = engine.recordingIdle(at: now)
+            setStatus(idle ? Self.idleStatus : "等待前台活动", idle ? "系统空闲" : precision)
             checkpoint(uptime)
             return
         }
@@ -282,6 +307,7 @@ final class Tracker: ObservableObject {
         let changed = previousFocus != foreground
         previousFocus = foreground
         var recentInput = signals.input.flatMap { $0 >= interactionFloor ? $0 : nil }
+        var deviceInput = signals.input
         var reading: Date?
         if browser != nil, let opening = signals.opening, opening >= interactionFloor { browserOpening = opening }
         if let page {
@@ -290,6 +316,7 @@ final class Tracker: ObservableObject {
                 let seen = Date(timeIntervalSince1970: timestamp / 1000)
                 if seen >= browserInputFloor && seen <= now && now.timeIntervalSince(seen) <= ChromeFeed.lease {
                     recentInput = max(recentInput ?? seen, seen)
+                    deviceInput = max(deviceInput ?? seen, seen)
                 }
             }
             if let timestamp = page.readingAt, timestamp > lastBrowserReading {
@@ -312,21 +339,23 @@ final class Tracker: ObservableObject {
         // A focus change opens at detection, so the switching input cannot backdate the new fragment.
         let validUntil = page == nil ? nil : feed?.receivedAt?.addingTimeInterval(ChromeFeed.lease)
         pending += engine.observe(at: now, Observation(foreground: foreground, input: recentInput.map { changed ? now : $0 },
-            reading: reading, videoPlaying: page?.videoPlaying ?? false, validUntil: validUntil))
+            reading: reading, videoPlaying: page?.videoPlaying ?? false, validUntil: validUntil,
+            monitorsIdle: true, deviceInput: deviceInput))
         let accuracy: String
         if let browser {
             if page != nil { accuracy = "\(browser.label) 页面级" }
             else { accuracy = usableFeed ? "应用级 · 当前网页未提供信号" : "应用级 · \(browser.label) 扩展未连接" }
         } else { accuracy = window?.title == nil ? "应用级" : "窗口级" }
         let bucket = preferences.schedule.activeBucket(for: decision.category, at: now, calendar: calendar)
+        let idle = engine.recordingIdle(at: now)
         let activity: String
-        if !engine.active(at: now) { activity = "等待互动" }
+        if !engine.active(at: now) { activity = idle ? Self.idleStatus : "等待互动" }
         else if let bucket {
             let reportedBucket: Bucket = bucket == .review && missingPageBasis == nil ? .entertainment : bucket
             activity = "\(reportedBucket.title) · \(decision.label)"
         }
         else { activity = "休息中" }
-        setStatus(activity, accuracy)
+        setStatus(activity, idle ? "系统空闲" : accuracy)
         if changed { flush() } else { checkpoint(uptime) }
     }
 
@@ -389,32 +418,40 @@ final class Tracker: ObservableObject {
         if precision != accuracy { precision = accuracy }
     }
 
-    private static var consoleLocked: Bool {
-        guard let state = CGSessionCopyCurrentDictionary() as? [String: Any] else { return true }
-        return (state["CGSSessionScreenIsLocked"] as? Bool ?? false)
-            || (state["kCGSessionOnConsoleKey"] as? Bool == false)
-            || (state["kCGSessionLoginDoneKey"] as? Bool == false)
+    private static var consoleState: (active: Bool, locked: Bool) {
+        guard let state = CGSessionCopyCurrentDictionary() as? [String: Any] else { return (false, false) }
+        let active = (state["kCGSessionOnConsoleKey"] as? Bool != false)
+            && (state["kCGSessionLoginDoneKey"] as? Bool != false)
+        return (active, state["CGSSessionScreenIsLocked"] as? Bool ?? false)
     }
 
     private func installObservers() {
         let center = NSWorkspace.shared.notificationCenter
-        func watch(_ name: Notification.Name, _ change: @escaping (Tracker) -> Void) {
+        func watch(_ name: Notification.Name, _ change: @escaping (Tracker) -> SampleEvent) {
             let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    change(self)
-                    self.sample()
+                    self.sample(event: change(self))
                 }
             }
             observers.append((center, token))
         }
-        watch(NSWorkspace.didActivateApplicationNotification) { _ in }
-        watch(NSWorkspace.willSleepNotification) { $0.systemSleeping = true }
-        watch(NSWorkspace.didWakeNotification) { $0.systemSleeping = false; $0.clearOnResume() }
-        watch(NSWorkspace.screensDidSleepNotification) { $0.screenSleeping = true }
-        watch(NSWorkspace.screensDidWakeNotification) { $0.screenSleeping = false; $0.clearOnResume() }
-        watch(NSWorkspace.sessionDidResignActiveNotification) { $0.sessionInactive = true }
-        watch(NSWorkspace.sessionDidBecomeActiveNotification) { $0.sessionInactive = false; $0.clearOnResume() }
+        watch(NSWorkspace.didActivateApplicationNotification) { _ in .regular }
+        watch(NSWorkspace.willSleepNotification) {
+            guard !$0.systemSleeping else { return .regular }
+            $0.systemSleeping = true
+            return .sleepStarted
+        }
+        watch(NSWorkspace.didWakeNotification) {
+            let observedSleep = $0.systemSleeping
+            $0.systemSleeping = false
+            $0.clearOnResume()
+            return observedSleep ? .sleepFinished : .regular
+        }
+        watch(NSWorkspace.screensDidSleepNotification) { $0.screenSleeping = true; return .regular }
+        watch(NSWorkspace.screensDidWakeNotification) { $0.screenSleeping = false; $0.clearOnResume(); return .regular }
+        watch(NSWorkspace.sessionDidResignActiveNotification) { $0.sessionInactive = true; return .regular }
+        watch(NSWorkspace.sessionDidBecomeActiveNotification) { $0.sessionInactive = false; $0.clearOnResume(); return .regular }
         for (name, locked) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
             let token = DistributedNotificationCenter.default().addObserver(forName: .init(name), object: nil,
                 queue: .main) { [weak self] _ in
@@ -430,7 +467,8 @@ final class Tracker: ObservableObject {
     }
 
     private func clearOnResume() {
-        engine.discardCoverage()
+        guard !systemSleeping else { return }
+        if engine.systemIdleReason == nil { engine.discardCoverage() }
         feeds.removeAll()
         resetInteraction(at: Date())
     }

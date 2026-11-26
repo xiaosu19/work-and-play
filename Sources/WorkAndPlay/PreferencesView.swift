@@ -28,12 +28,16 @@ private struct TrackingSettings: View {
     @State private var idle = ""
     @State private var reading = ""
     @State private var video = false
+    @State private var countIdle = false
 
     var body: some View {
         Form {
             Section("活动续计") {
                 TextField("操作空闲上限（秒）", text: $idle).monospacedDigit()
                 TextField("阅读续计上限（秒）", text: $reading).monospacedDigit()
+                Toggle("普通时段的空闲计入摸鱼", isOn: $countIdle)
+                Text("超过操作空闲上限后的时间记为设备空闲。锁屏和睡眠从系统状态切换时起计入，有效阅读和前台视频计时优先。")
+                    .foregroundStyle(.secondary)
                 Toggle("前台视频播放时持续计入摸鱼", isOn: $video)
                 Text("Chrome 和 Edge 的已识别非工作视频可按播放状态续计。原生 App 按前台操作和空闲上限计时。")
                     .foregroundStyle(.secondary)
@@ -78,6 +82,7 @@ private struct TrackingSettings: View {
             idle = String(tracker.preferences.idleSeconds)
             reading = String(tracker.preferences.readingSeconds)
             video = tracker.preferences.countVideo
+            countIdle = tracker.preferences.countIdleAsEntertainment
         }
     }
 
@@ -87,6 +92,7 @@ private struct TrackingSettings: View {
         next.idleSeconds = idleSeconds
         next.readingSeconds = readingSeconds
         next.countVideo = video
+        next.countIdleAsEntertainment = countIdle
         _ = tracker.update(next)
     }
 }
@@ -142,18 +148,30 @@ private struct RuleSettings: View {
     }
 }
 
+enum RuleEditorScope {
+    case custom, website, application
+
+    var title: String {
+        switch self {
+        case .custom: "分类规则"
+        case .website: "网站规则"
+        case .application: "应用规则"
+        }
+    }
+}
+
 struct RuleEditor: View {
     @ObservedObject var tracker: Tracker
     @Environment(\.dismiss) private var dismiss
     @State var rule: Rule
     var guidance: String?
-    var websiteOnly = false
+    var scope = RuleEditorScope.custom
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(websiteOnly ? "网站规则" : "分类规则").font(.title2.bold())
+            Text(scope.title).font(.title2.bold())
             if let guidance { Text(guidance).font(.callout).foregroundStyle(.secondary) }
-            RuleFields(rule: $rule, websiteOnly: websiteOnly)
+            RuleFields(rule: $rule, scope: scope)
             if let error = tracker.errorMessage { Text(error).foregroundStyle(.red) }
             HStack {
                 Spacer()
@@ -179,16 +197,20 @@ struct RuleEditor: View {
 struct RuleFields: View {
     @Binding var rule: Rule
     var showCategory = true
-    var websiteOnly = false
+    var scope = RuleEditorScope.custom
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !websiteOnly {
+            if scope == .custom {
                 field("App 标识", text: $rule.appID, example: "可选，例如 com.apple.Terminal")
                 field("窗口标题包含", text: $rule.windowContains, example: "可选")
             }
-            field("域名", text: $rule.host, example: "docs.example.com 或 *.example.com")
-            if !websiteOnly {
+            if scope != .application {
+                field("域名", text: $rule.host, example: "docs.example.com 或 *.example.com")
+            } else {
+                LabeledContent("App 标识", value: rule.appID)
+            }
+            if scope == .custom {
                 field("路径前缀", text: $rule.pathPrefix, example: "/work")
                 field("项目标识", text: $rule.project, example: "窗口标题或路径中的关键词")
             }
@@ -203,9 +225,11 @@ struct RuleFields: View {
             Picker("计时方式", selection: $rule.kind) {
                 ForEach(ActivityKind.allCases) { Text($0.title).tag($0) }
             }
-            Text("*.example.com 或 *example.com 覆盖主域名和子域名。")
-                .font(.caption).foregroundStyle(.secondary)
-            if !websiteOnly {
+            if scope != .application {
+                Text("*.example.com 或 *example.com 覆盖主域名和子域名。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if scope == .custom {
                 Text("至少填一项，所填条件需同时匹配。App 标识使用 Bundle ID。路径按目录匹配，并需填写域名。")
                     .font(.caption).foregroundStyle(.secondary)
             }

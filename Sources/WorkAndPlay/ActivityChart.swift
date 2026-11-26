@@ -6,10 +6,14 @@ struct ActivityChart: View {
     let period: ReportPeriod
     let anchor: Date
     let totals: [ReportTotal]
-    let entries: [ReportEntry]
+    let report: DailyReport
+    let schedule: Schedule
     let showMissingWebsites: () -> Void
 
+    private static let gapColor = Color.workMuted.opacity(0.30)
+
     var body: some View {
+        let gaps = period == .day ? report.unrecordedOrdinaryIntervals(schedule: schedule) : []
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
                 Text(period == .day ? "当天时间分布" : "时长趋势")
@@ -24,7 +28,7 @@ struct ActivityChart: View {
             }
 
             if period == .day {
-                DailyTimeline(anchor: anchor, entries: entries)
+                DailyTimeline(anchor: anchor, entries: report.entries, gaps: gaps, gapColor: Self.gapColor)
             } else {
                 TrendChart(columns: period.chartColumns(anchor: anchor, totals: totals))
             }
@@ -45,6 +49,10 @@ struct ActivityChart: View {
             }
             .font(.system(size: 11))
             .foregroundStyle(Color.workMuted)
+
+            if let zoneID = report.entries.first?.timeZoneID, !gaps.isEmpty {
+                unrecordedDetails(gaps, timeZone: TimeZone(identifier: zoneID) ?? .current)
+            }
         }
         .padding(17)
         .workCard()
@@ -56,11 +64,49 @@ struct ActivityChart: View {
             Text(title)
         }
     }
+
+    private func unrecordedDetails(_ gaps: [DateInterval], timeZone: TimeZone) -> some View {
+        let total = gaps.reduce(0) { $0 + $1.duration }
+        let clock = Date.FormatStyle(date: .omitted, time: .standard, locale: Locale(identifier: "zh_CN"), timeZone: timeZone)
+        return DisclosureGroup {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("按当前排班，只列当天首尾记录之间的普通时段。开启清醒空闲统计后，无操作达到空闲上限才开始计入。")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 3)
+                LazyVStack(alignment: .leading, spacing: 5) {
+                    ForEach(gaps.sorted { $0.duration > $1.duration }, id: \.start) { gap in
+                        HStack {
+                            Text("\(gap.start.formatted(clock)) – \(gap.end.formatted(clock))")
+                            Spacer()
+                            Text(durationText(gap.duration))
+                        }
+                        .monospacedDigit()
+                    }
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(Color.workMuted)
+            .padding(.top, 6)
+        } label: {
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Self.gapColor)
+                    .frame(width: 10, height: 7)
+                    .accessibilityHidden(true)
+                Text("未计入 \(durationText(total))")
+                    .monospacedDigit()
+            }
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.workMuted)
+        }
+    }
 }
 
 private struct DailyTimeline: View {
     let anchor: Date
     let entries: [ReportEntry]
+    let gaps: [DateInterval]
+    let gapColor: Color
 
     var body: some View {
         let zones = Set(entries.map(\.timeZoneID))
@@ -93,6 +139,11 @@ private struct DailyTimeline: View {
                     context.fill(outline, with: .color(.workSidebar))
                     var fragments = context
                     fragments.clip(to: outline)
+                    for gap in gaps {
+                        let x = size.width * gap.start.timeIntervalSince(day.start) / day.duration
+                        let width = size.width * gap.duration / day.duration
+                        fragments.fill(Path(CGRect(x: x, y: 0, width: width, height: bar.height)), with: .color(gapColor))
+                    }
                     for entry in entries {
                         let start = max(day.start, entry.start)
                         let end = min(day.end, entry.end)

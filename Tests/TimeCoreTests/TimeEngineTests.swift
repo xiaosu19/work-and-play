@@ -81,6 +81,110 @@ final class TimeEngineTests {
         expect(engine.observe(at: pause.addingTimeInterval(60), Observation(foreground: player)).isEmpty)
     }
 
+    func testOptionalDeviceIdleStartsAtThresholdAndEndsAtInput() {
+        var preferences = Preferences()
+        preferences.idleSeconds = 3
+        let work = front("editor", .work)
+        let monitoring = Observation(foreground: work, monitorsIdle: true)
+        var engine = TimeEngine(preferences: preferences, calendar: calendar)
+        _ = engine.observe(at: noon, monitoring)
+        expect(engine.observe(at: noon.addingTimeInterval(10), monitoring).isEmpty)
+
+        preferences.countIdleAsEntertainment = true
+        engine.reconfigure(preferences, calendar: calendar)
+        _ = engine.observe(at: noon, Observation(foreground: work, input: noon, monitorsIdle: true, deviceInput: noon))
+        var slices = engine.observe(at: noon.addingTimeInterval(2), monitoring)
+        let renewed = noon.addingTimeInterval(5)
+        let input = noon.addingTimeInterval(4)
+        slices += engine.observe(at: renewed, Observation(foreground: work, input: renewed,
+                                                          monitorsIdle: true, deviceInput: input))
+        expect(slices.map(\.duration) == [2, 1, 1])
+        expect(slices.map(\.bucket) == [.regular, .regular, .entertainment])
+        expect(slices.last?.end == input && slices.last?.activity == .deviceIdle)
+        expect(slices.allSatisfy { $0.visitID == nil })
+        expect(!engine.recordingIdle(at: renewed))
+        expect(engine.observe(at: renewed, monitoring).isEmpty)
+    }
+
+    func testDeviceIdleRespectsRestMidnightSuspensionAndCoverage() {
+        var preferences = Preferences()
+        preferences.countIdleAsEntertainment = true
+        preferences.idleSeconds = 3
+        preferences.schedule.overrides["2026-11-26"] = [RestPeriod(start: 0, end: 1)]
+        var engine = TimeEngine(preferences: preferences, calendar: calendar)
+        let start = noon.addingTimeInterval(43200 - 10)
+        let monitoring = Observation(monitorsIdle: true)
+        expect(engine.observe(at: start, monitoring).isEmpty)
+        expect(engine.recordingIdle(at: start.addingTimeInterval(3)))
+        expect(!engine.recordingIdle(at: start.addingTimeInterval(11)))
+        let suspended = engine.observe(at: start.addingTimeInterval(80), Observation(suspended: true))
+        expect(suspended.map(\.duration) == [7, 10])
+        expect(suspended.map(\.day) == ["2026-11-25", "2026-11-26"])
+        expect(suspended.allSatisfy { $0.bucket == .entertainment && $0.restReason == nil })
+        expect(!engine.recordingIdle(at: start.addingTimeInterval(90)))
+        let awake = start.addingTimeInterval(120)
+        expect(engine.observe(at: awake, Observation(monitorsIdle: true, deviceInput: start)).isEmpty)
+        expect(engine.observe(at: awake.addingTimeInterval(6), monitoring).map(\.duration) == [3])
+
+        engine.discardCoverage()
+        let restarted = start.addingTimeInterval(200)
+        expect(engine.observe(at: restarted, monitoring).isEmpty)
+        expect(engine.observe(at: restarted.addingTimeInterval(3), monitoring).isEmpty)
+        preferences.paused = true
+        engine.reconfigure(preferences, calendar: calendar)
+        expect(engine.observe(at: restarted.addingTimeInterval(30), monitoring).isEmpty)
+        expect(engine.observe(at: restarted.addingTimeInterval(60), monitoring).isEmpty)
+    }
+
+    func testDeviceIdleDoesNotOverlapReadingOrPlayingVideo() {
+        var preferences = Preferences()
+        preferences.countIdleAsEntertainment = true
+        preferences.idleSeconds = 3
+        preferences.readingSeconds = 8
+        preferences.countVideo = true
+        var engine = TimeEngine(preferences: preferences, calendar: calendar)
+        let document = front("document", .work, .reading)
+        let player = front("video", .entertainment)
+        _ = engine.observe(at: noon, Observation(foreground: document, reading: noon, monitorsIdle: true, deviceInput: noon))
+        var slices = engine.observe(at: noon.addingTimeInterval(6), Observation(foreground: document, monitorsIdle: true))
+        expect(!engine.recordingIdle(at: noon.addingTimeInterval(6)))
+        slices += engine.observe(at: noon.addingTimeInterval(9),
+                                 Observation(foreground: player, videoPlaying: true, monitorsIdle: true))
+        expect(!engine.recordingIdle(at: noon.addingTimeInterval(9)))
+        slices += engine.observe(at: noon.addingTimeInterval(15), Observation(foreground: player, monitorsIdle: true))
+        slices += engine.observe(at: noon.addingTimeInterval(18), Observation(foreground: player, monitorsIdle: true))
+        expect(slices.map(\.duration) == [6, 2, 1, 6, 3])
+        expect(slices.map { $0.activity.basis } == [.app, .app, .deviceIdle, .app, .deviceIdle])
+    }
+
+    func testKnownLockAndSleepCountAsIdleWithoutOverlap() {
+        var preferences = Preferences()
+        preferences.countIdleAsEntertainment = true
+        preferences.schedule.overrides["2026-11-25"] = [RestPeriod(start: 720, end: 780)]
+        var engine = TimeEngine(preferences: preferences, calendar: calendar)
+        let editor = front("editor", .work)
+        let start = noon.addingTimeInterval(-30)
+        _ = engine.observe(at: start, Observation(foreground: editor, input: start, monitorsIdle: true, deviceInput: start))
+        let lock = noon.addingTimeInterval(-15)
+        var slices = engine.observe(at: lock, Observation(suspended: true, systemIdle: .locked))
+        expect(engine.recordingIdle(at: lock))
+        slices += engine.observe(at: noon.addingTimeInterval(-5), Observation(suspended: true, systemIdle: .sleeping))
+        let wake = noon.addingTimeInterval(3605)
+        slices += engine.observe(at: wake, Observation(suspended: true, systemIdle: .locked))
+        let unlock = wake.addingTimeInterval(5)
+        slices += engine.observe(at: unlock, Observation(monitorsIdle: true, deviceInput: unlock))
+        expect(slices.map(\.duration) == [15, 10, 5, 5, 5])
+        expect(slices.map(\.bucket) == [.regular, .entertainment, .entertainment, .entertainment, .entertainment])
+        expect(slices.map { $0.activity.basis } == [.app, .screenLocked, .systemSleeping, .systemSleeping, .screenLocked])
+        expect(slices.allSatisfy { $0.restReason == nil && $0.visitID == nil })
+        expect(!engine.recordingIdle(at: unlock))
+
+        preferences.countIdleAsEntertainment = false
+        engine.reconfigure(preferences, calendar: calendar)
+        expect(engine.observe(at: lock, Observation(suspended: true, systemIdle: .locked)).isEmpty)
+        expect(engine.observe(at: unlock, Observation(monitorsIdle: true)).isEmpty)
+    }
+
     func testMidnightOverrideAndBoundaryDoesNotRenew() {
         var prefs = Preferences()
         prefs.schedule.weekdays[5] = [RestPeriod(start: 0, end: 1440)]
@@ -292,6 +396,11 @@ final class TimeEngineTests {
         for browser in browsers {
             expect(result("docs.example.com", in: browser, rules: [websiteOnly, misconfigured]).ruleID == websiteOnly.id)
         }
+        let applicationOnly = Rule(appID: browsers[1], category: .entertainment)
+        expect(applicationOnly.isApplicationOnly)
+        expect(!websiteOnly.isApplicationOnly && !misconfigured.isApplicationOnly)
+        expect(result(nil, rules: [applicationOnly]).ruleID == applicationOnly.id)
+        expect(result("docs.example.com", rules: [websiteOnly, applicationOnly]).ruleID == websiteOnly.id)
     }
 
     func testDaylightSavingUsesElapsedHours() {

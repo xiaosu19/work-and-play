@@ -11,7 +11,7 @@
 
 系统要求为 **macOS 14 或更新版本**。下载包包含 Apple 芯片与 Intel 架构。
 
-1. 从 [GitHub Releases](https://github.com/xiaosu19/work-and-play/releases/latest) 下载通用安装包，例如 `WorkAndPlay-1.0.1-universal.zip`，然后解压。
+1. 从 [GitHub Releases](https://github.com/xiaosu19/work-and-play/releases/latest) 下载通用安装包，例如 `WorkAndPlay-1.0.2-universal.zip`，然后解压。
 2. 把 `WorkAndPlay.app` 拖到 Finder 的「应用程序」，双击打开。保留同包的 `install-chrome-host.sh`，安装浏览器扩展时会用到。
 3. 打开「设置 → 休息排班 → 按上下班设置」，填写上班、午休开始和结束、下班时间，选择应用到哪些星期。多段休息、全天休息和个别日期的临时排班也可以单独设置。
 
@@ -28,7 +28,7 @@ App 单独运行即可按应用名称计时。接入网页统计需要完成**�
 在终端进入解压后的目录，运行以下命令。如果 App 放在其他位置，最后一个参数换成实际完整路径。脚本给当前 macOS 用户注册连接器，无需 `sudo`。
 
 ```sh
-cd ~/Downloads/WorkAndPlay-1.0.1
+cd ~/Downloads/WorkAndPlay-1.0.2
 bash ./install-chrome-host.sh /Applications/WorkAndPlay.app
 ```
 
@@ -59,6 +59,8 @@ bash ./install-chrome-host.sh /Applications/WorkAndPlay.app
 
 工时簿按已知 App、网站和可用窗口信号自动分类。只取得 Chrome 或 Edge 应用名且无法判断用途的片段会单列为「网页未识别」。在时间图或活动明细可以查看这些片段，新记录会标出扩展是否连接。报表里的普通工时、加班和摸鱼总数分别统计已入各自分类的片段。
 
+在日报的「当天时间分布」展开「未计入」，可核对第一条到最后一条记录之间的空档起止和时长。空档按当前排班显示普通时段。
+
 | 场景 | 默认计时方式 |
 | --- | --- |
 | 写代码、终端操作 | 键鼠活动续计，连续空闲 180 秒后停止。 |
@@ -66,6 +68,10 @@ bash ./install-chrome-host.sh /Applications/WorkAndPlay.app
 | 前台看视频 | 可在「设置 → 计时」打开前台视频计时。只有归为摸鱼、可见且正在播放的网页视频才按播放状态续计。 |
 | 工作时后台放歌，或后台跑构建 | 同一时刻只统计一个前台活动。后台音乐、视频和任务不另计。 |
 | 锁屏、睡眠、暂停 | 当前计时停止，恢复后使用新的活动信号。 |
+
+在「设置 → 计时」可开启「普通时段的空闲计入摸鱼」。例如空闲上限设为 180 秒，连续 5 分钟没有键鼠操作时，超过上限的 2 分钟可记为「设备空闲」。已确认的锁屏、睡眠从状态切换起计，睡眠片段在唤醒后补记。有效阅读和前台视频优先于清醒空闲，休息与暂停时间不计入。开启后可在「摸鱼 → 应用与网站」查看设备空闲，片段会标出原因。
+
+「时间总览 → 应用统计」按 App 汇总前台片段数、总时长、工作与摸鱼。可以查看 App 的全部片段，或点「设为」为该 App 设置后续分类。网站、路径、窗口等更具体的规则优先。
 
 ## 权限与本机数据
 
