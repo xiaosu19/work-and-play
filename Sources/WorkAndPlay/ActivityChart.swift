@@ -50,8 +50,10 @@ struct ActivityChart: View {
             .font(.system(size: 11))
             .foregroundStyle(Color.workMuted)
 
-            if let zoneID = report.entries.first?.timeZoneID, !gaps.isEmpty {
-                unrecordedDetails(gaps, timeZone: TimeZone(identifier: zoneID) ?? .current)
+            if let entry = report.entries.first, !gaps.isEmpty {
+                UnrecordedDetails(gaps: gaps, timeZone: TimeZone(identifier: entry.timeZoneID) ?? .current,
+                                  swatch: Self.gapColor)
+                    .id(entry.day)
             }
         }
         .padding(17)
@@ -64,33 +66,27 @@ struct ActivityChart: View {
             Text(title)
         }
     }
+}
 
-    private func unrecordedDetails(_ gaps: [DateInterval], timeZone: TimeZone) -> some View {
+private struct UnrecordedDetails: View {
+    let gaps: [DateInterval]
+    let timeZone: TimeZone
+    let swatch: Color
+
+    @State private var expanded = false
+    @State private var page = 0
+
+    private let pageSize = 8
+    private var pageCount: Int { max(1, (gaps.count + pageSize - 1) / pageSize) }
+
+    var body: some View {
         let total = gaps.reduce(0) { $0 + $1.duration }
-        let clock = Date.FormatStyle(date: .omitted, time: .standard, locale: Locale(identifier: "zh_CN"), timeZone: timeZone)
-        return DisclosureGroup {
-            VStack(alignment: .leading, spacing: 7) {
-                Text("按当前排班，只列当天首尾记录之间的普通时段。开启清醒空闲统计后，无操作达到空闲上限才开始计入。")
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.bottom, 3)
-                LazyVStack(alignment: .leading, spacing: 5) {
-                    ForEach(gaps.sorted { $0.duration > $1.duration }, id: \.start) { gap in
-                        HStack {
-                            Text("\(gap.start.formatted(clock)) – \(gap.end.formatted(clock))")
-                            Spacer()
-                            Text(durationText(gap.duration))
-                        }
-                        .monospacedDigit()
-                    }
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(Color.workMuted)
-            .padding(.top, 6)
+        DisclosureGroup(isExpanded: $expanded) {
+            pageContent
         } label: {
             HStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(Self.gapColor)
+                    .fill(swatch)
                     .frame(width: 10, height: 7)
                     .accessibilityHidden(true)
                 Text("未计入 \(durationText(total))")
@@ -99,6 +95,58 @@ struct ActivityChart: View {
             .font(.system(size: 11, weight: .medium))
             .foregroundStyle(Color.workMuted)
         }
+        .onChange(of: expanded) { _, isExpanded in
+            if !isExpanded { page = 0 }
+        }
+        .onChange(of: pageCount) { _, pages in
+            page = min(page, pages - 1)
+        }
+    }
+
+    private var pageContent: some View {
+        let visiblePage = min(page, pageCount - 1)
+        let sorted = gaps.sorted {
+            if $0.duration == $1.duration { return $0.start < $1.start }
+            return $0.duration > $1.duration
+        }
+        let visibleGaps = sorted.dropFirst(visiblePage * pageSize).prefix(pageSize)
+        let clock = Date.FormatStyle(date: .omitted, time: .standard, locale: Locale(identifier: "zh_CN"), timeZone: timeZone)
+
+        return VStack(alignment: .leading, spacing: 7) {
+            Text("按当前排班，只列当天首尾记录之间的普通时段。开启清醒空闲统计后，无操作达到空闲上限才开始计入。")
+                .fixedSize(horizontal: false, vertical: true)
+            if pageCount > 1 {
+                HStack(spacing: 8) {
+                    Text("\(gaps.count) 段空档")
+                    Spacer()
+                    Button { page = visiblePage - 1 } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    .disabled(visiblePage == 0)
+                    .accessibilityLabel("上一页空档")
+                    Text("第 \(visiblePage + 1) 页，共 \(pageCount) 页")
+                    Button { page = visiblePage + 1 } label: {
+                        Image(systemName: "chevron.right")
+                    }
+                    .disabled(visiblePage + 1 == pageCount)
+                    .accessibilityLabel("下一页空档")
+                }
+                .controlSize(.small)
+                .monospacedDigit()
+            }
+            ForEach(visibleGaps, id: \.start) { gap in
+                HStack {
+                    Text("\(gap.start.formatted(clock)) – \(gap.end.formatted(clock))")
+                    Spacer()
+                    Text(durationText(gap.duration))
+                }
+                .monospacedDigit()
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(Color.workMuted)
+        .padding(.top, 6)
     }
 }
 
