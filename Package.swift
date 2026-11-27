@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .executable(name: "WorkAndPlay", targets: ["WorkAndPlay"]),
         .executable(name: "ChromeNativeHost", targets: ["ChromeNativeHost"]),
+        .executable(name: "WorkAndPlayReport", targets: ["WorkAndPlayReport"]),
         .library(name: "TimeCore", targets: ["TimeCore"])
     ],
     targets: [
@@ -16,6 +17,7 @@ let package = Package(
         .target(name: "ChromeBridge"),
         .executableTarget(name: "ChromeNativeHost", dependencies: ["ChromeBridge"]),
         .executableTarget(name: "WorkAndPlay", dependencies: ["TimeCore", "TimeStore", "ChromeBridge"]),
+        .executableTarget(name: "WorkAndPlayReport", dependencies: ["TimeStore"]),
         .executableTarget(name: "Verification", dependencies: ["TimeCore", "TimeStore", "ChromeBridge"], path: "Tests")
     ],
     swiftLanguageModes: [.v5]

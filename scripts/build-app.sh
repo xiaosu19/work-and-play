@@ -24,9 +24,11 @@ if [ "${1:-}" = --universal ]; then
     other_bin="$(swift build -c release "${other_target[@]}" --show-bin-path)"
     lipo -create "$bin/WorkAndPlay" "$other_bin/WorkAndPlay" -output "$app/Contents/MacOS/WorkAndPlay"
     lipo -create "$bin/ChromeNativeHost" "$other_bin/ChromeNativeHost" -output "$app/Contents/Helpers/ChromeNativeHost"
+    lipo -create "$bin/WorkAndPlayReport" "$other_bin/WorkAndPlayReport" -output "$app/Contents/Helpers/WorkAndPlayReport"
 else
     cp "$bin/WorkAndPlay" "$app/Contents/MacOS/"
     cp "$bin/ChromeNativeHost" "$app/Contents/Helpers/"
+    cp "$bin/WorkAndPlayReport" "$app/Contents/Helpers/"
 fi
 cp "$app/Contents/Helpers/ChromeNativeHost" "$app/Contents/Helpers/EdgeNativeHost"
 swift "$project/scripts/make-icon.swift" "$staging/WorkAndPlay.iconset"
@@ -43,8 +45,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key><string>WorkAndPlay</string>
     <key>CFBundleIdentifier</key><string>local.workandplay</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0.3</string>
-    <key>CFBundleVersion</key><string>13</string>
+    <key>CFBundleShortVersionString</key><string>1.1.1</string>
+    <key>CFBundleVersion</key><string>15</string>
     <key>CFBundleIconFile</key><string>WorkAndPlay.icns</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -53,6 +55,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 PLIST
 codesign --force --sign - "$app/Contents/Helpers/ChromeNativeHost"
 codesign --force --sign - "$app/Contents/Helpers/EdgeNativeHost"
+codesign --force --sign - "$app/Contents/Helpers/WorkAndPlayReport"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 rm -rf -- "$project/dist/WorkAndPlay.app"

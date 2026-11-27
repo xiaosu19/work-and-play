@@ -20,14 +20,15 @@ defer {
 
 do {
     while let data = try NativeFrame.read(input) {
-        var delivered = false
+        var reply = BrowserReply(connected: false)
         if let packet = ChromePacket.decode(data)?.identified(as: browser),
            let clean = try? JSONEncoder().encode(packet) {
             latest = packet
-            delivered = LocalBridge.send(clean)
+            reply = packet.workPermitRequested == true
+                ? LocalBridge.exchange(clean)
+                : BrowserReply(connected: LocalBridge.send(clean))
         }
-        let reply = Data((delivered ? #"{"connected":true}"# : #"{"connected":false}"#).utf8)
-        try NativeFrame.write(reply, to: output)
+        try NativeFrame.write(JSONEncoder().encode(reply), to: output)
     }
 } catch {
     // The browser owns this transport. Connection state is reported by the popup and expires in the app.

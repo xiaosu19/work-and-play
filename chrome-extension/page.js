@@ -1,9 +1,12 @@
 (() => {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 15) | 64;
-  bytes[8] = (bytes[8] & 63) | 128;
-  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
-  const documentID = [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
+  function uuid() {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+    return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
+  }
+  const documentID = uuid();
   const navigationKeys = new Set(["PageDown", "PageUp", "Home", "End", "ArrowDown", "ArrowUp", "Space"]);
   const scrollPositions = new WeakMap();
   const playback = new WeakMap();
@@ -20,6 +23,62 @@
   let pendingIntent;
   let lastScrollAt = 0;
   let watchingVideo = false;
+  let workPermit;
+  let workSignals = [];
+  let lastWorkActionAt = 0;
+  let waitingForResult;
+
+  function clearWork() {
+    workPermit = undefined;
+    workSignals = [];
+    waitingForResult = undefined;
+    lastWorkActionAt = 0;
+  }
+
+  function visible(el) {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0
+      && rect.left < innerWidth && rect.top < innerHeight
+      && (el.checkVisibility?.({ opacityProperty: true, visibilityProperty: true }) ?? true);
+  }
+
+  function canDescribe() {
+    return workPermit && performance.now() < workPermit.expires && workPermit.path === location.pathname
+      && document.visibilityState === "visible" && document.hasFocus()
+      && !/(^|\/)(login|sign-?in|oauth|sso|checkout|payments?|2fa|mfa)(\/|$)/i.test(location.pathname)
+      && !Array.from(document.querySelectorAll('input[type="password"], input[autocomplete="one-time-code"], input[autocomplete^="cc-"]')).some(visible);
+  }
+
+  function hasTopic() {
+    const keyword = workPermit?.keyword?.toLowerCase();
+    return !!keyword && Array.from(document.querySelectorAll("h1, h2")).slice(0, 20)
+      .some(el => visible(el) && el.textContent.slice(0, 300).toLowerCase().includes(keyword));
+  }
+
+  function pushWork(signal) {
+    workSignals = workSignals.slice(-7);
+    workSignals.push(signal);
+    notify();
+  }
+
+  function feedback(action) {
+    const pattern = action === "submit"
+      ? /^(提交成功|已提交|successfully submitted|submitted successfully|submission successful)[.!。！]?$/i
+      : /^(保存成功|已保存|successfully saved|saved successfully|changes saved)[.!。！]?$/i;
+    return Array.from(document.querySelectorAll('[role="status"], [role="alert"], output')).slice(0, 25)
+      .filter(el => visible(el) && pattern.test(el.textContent.trim()));
+  }
+
+  function checkWorkResult() {
+    if (!waitingForResult || !canDescribe()) return;
+    const { signal, baseline } = waitingForResult;
+    if (signal.permit !== workPermit.id || Date.now() - signal.at > 4500) {
+      waitingForResult = undefined;
+    } else if (feedback(signal.action).some(el => !baseline.has(el))) {
+      waitingForResult = undefined;
+      pushWork({ ...signal, confirmed: true });
+    }
+  }
 
   function notify(type = "page-signal") {
     void chrome.runtime.sendMessage({ type }).catch(() => {});
@@ -31,6 +90,7 @@
     readingAt = null;
     interactionAt = null;
     lastScrollAt = 0;
+    clearWork();
   }
 
   function recordInteraction(event) {
@@ -46,9 +106,9 @@
   for (const type of ["pointerdown", "keydown", "wheel", "touchstart"]) {
     addEventListener(type, recordInteraction, { capture: true, passive: true });
   }
-  addEventListener("blur", () => { interactionAt = null; });
+  addEventListener("blur", () => { interactionAt = null; clearWork(); });
   addEventListener("visibilitychange", () => {
-    if (document.visibilityState !== "visible") interactionAt = null;
+    if (document.visibilityState !== "visible") { interactionAt = null; clearWork(); }
   });
 
   function read() {
@@ -56,6 +116,11 @@
     syncPath();
     readingAt = Date.now();
     notify();
+    if (canDescribe() && readingAt - lastWorkActionAt >= 12000) {
+      lastWorkActionAt = readingAt;
+      pushWork({ id: uuid(), permit: workPermit.id, at: readingAt, action: "review",
+        confirmed: false, matchedTopic: hasTopic() });
+    }
   }
 
   function markIntent() {
@@ -95,6 +160,20 @@
     const label = control?.getAttribute("aria-label") || control?.getAttribute("title") || "";
     if (control?.rel === "next" || control?.rel === "prev"
         || /^(next page|previous page|下一页|上一页|翻到下一页|翻到上一页)$/i.test(label.trim())) read();
+  }, true);
+
+  addEventListener("click", event => {
+    if (!event.isTrusted || !canDescribe()) return;
+    if (event.target?.closest?.("input:not([type=button]):not([type=submit]), textarea, [contenteditable]")) return;
+    const button = event.target?.closest?.("button, [role=button], input[type=submit]");
+    const label = (button?.getAttribute("aria-label") || button?.textContent || button?.value || "").trim();
+    const action = /^(submit|提交)$/i.test(label) ? "submit" : /^(save|保存)$/i.test(label) ? "save" : "interact";
+    const at = Date.now();
+    if (action === "interact" && at - lastWorkActionAt < 12000) return;
+    lastWorkActionAt = at;
+    const signal = { id: uuid(), permit: workPermit.id, at, action, confirmed: false, matchedTopic: hasTopic() };
+    if (action !== "interact") waitingForResult = { signal, baseline: new Set(feedback(action)) };
+    pushWork(signal);
   }, true);
 
   addEventListener("scroll", event => {
@@ -146,7 +225,16 @@
   }
 
   chrome.runtime.onMessage.addListener((message, sender, reply) => {
-    if (sender.id !== chrome.runtime.id || message.type !== "snapshot") return;
+    if (sender.id !== chrome.runtime.id) return;
+    if (message.type === "work-permit") {
+      if (message.document !== documentID || message.host !== location.hostname.toLowerCase()
+          || message.path !== location.pathname || document.visibilityState !== "visible" || !document.hasFocus()) return;
+      if (message.permit?.id !== workPermit?.id) clearWork();
+      if (message.permit) workPermit = { ...message.permit, path: message.path, expires: performance.now() + 1500 };
+      else clearWork();
+      return;
+    }
+    if (message.type !== "snapshot") return;
     if (document.visibilityState !== "visible") {
       reply(null);
       return;
@@ -159,7 +247,11 @@
       reply(null);
       return;
     }
-    reply({ document: documentID, host, path, readingAt, interactionAt, videoPlaying });
+    checkWorkResult();
+    const picked = canDescribe() ? workSignals.filter(signal => Date.now() - signal.at <= 4700) : [];
+    workSignals = [];
+    reply({ document: documentID, host, path, readingAt, interactionAt, videoPlaying,
+      ...(picked.length > 0 ? { workSignals: picked } : {}) });
   });
   notify("page-ready");
 })();

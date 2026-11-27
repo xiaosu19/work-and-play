@@ -22,6 +22,7 @@ struct RunVerification {
         let engine = TimeEngineTests()
         let store = SQLiteStoreTests()
         let bridge = BridgeTests()
+        let workReport = WorkReportTests()
         let cases: [(String, () throws -> Void)] = [
             ("阅读 90 + 120 秒与重复上报", engine.testReadingExampleAndDuplicate),
             ("午休 10 + 10 分钟与休息隐私", engine.testLunchExampleAndRestPrivacy),
@@ -43,6 +44,9 @@ struct RunVerification {
             ("夏令时切换的 23 与 25 小时日界", engine.testDaylightSavingUsesElapsedHours),
             ("SQLite 隐私、总数、修正与重开", store.testPrivacyTotalsCorrectionAndRestart),
             ("日报列出十分钟空档，排除午休且不生成片段", store.testDailyReportShowsUnrecordedTimeWithoutCountingIt),
+            ("工作网站与客户会话按明确授权匹配", workReport.activityAuthorizationRequiresSpecificWorkContext),
+            ("日报周报仅使用工作，独立摸鱼接口、加班与撤销", workReport.workAndLeisureReportsStaySeparateAndCountOvertime),
+            ("自动 JSON 分流、重启重试及修正后更新", workReport.automaticOperationJSONKeepsChannelsAndCorrectionsSeparate),
             ("设备空闲旧配置兼容、入库与报表", store.testDeviceIdleSettingAndReportAreBackwardCompatible),
             ("SQLite 连续片段合并与重复写入", store.testCheckpointsMergeOnlyContiguousSpans),
             ("网页未识别单列、应用统计汇总与历史修正", store.testHistoricalAutomaticClassificationPreservesOverrides),

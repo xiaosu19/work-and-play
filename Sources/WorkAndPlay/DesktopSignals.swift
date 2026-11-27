@@ -32,6 +32,26 @@ struct DesktopInput {
 struct DesktopWindow {
     let title: String?
     let identifier: CFHashCode
+    private let element: AXUIElement
+
+    static func focusedElementIsSecure(process: pid_t) -> Bool {
+        let app = AXUIElementCreateApplication(process)
+        AXUIElementSetMessagingTimeout(app, 0.15)
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return false }
+        var subrole: CFTypeRef?
+        let element = focused as! AXUIElement
+        AXUIElementSetMessagingTimeout(element, 0.15)
+        AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+        return (subrole as? String) == (kAXSecureTextFieldSubrole as String)
+    }
+
+    var edited: Bool? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXEditedAttribute as CFString, &value) == .success else { return nil }
+        return value as? Bool
+    }
 
     init?(process: pid_t) {
         guard AXIsProcessTrusted() else { return nil }
@@ -41,6 +61,7 @@ struct DesktopWindow {
         guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &result) == .success,
               let result, CFGetTypeID(result) == AXUIElementGetTypeID() else { return nil }
         let window = result as! AXUIElement
+        element = window
         var titleValue: CFTypeRef?
         AXUIElementSetMessagingTimeout(window, 0.15)
         AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)

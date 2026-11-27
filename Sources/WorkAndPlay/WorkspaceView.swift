@@ -18,16 +18,29 @@ private enum WorkspaceAppearance: String, CaseIterable, Identifiable {
 }
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case overview, preferences
+    case overview, digest, preferences
 
     var id: Self { self }
-    var title: String { self == .overview ? "时间总览" : "设置" }
-    var symbol: String { self == .overview ? "chart.bar.xaxis" : "slider.horizontal.3" }
+    var title: String {
+        switch self {
+        case .overview: "时间总览"
+        case .digest: "记录与接口"
+        case .preferences: "设置"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .overview: "chart.bar.xaxis"
+        case .digest: "doc.text"
+        case .preferences: "slider.horizontal.3"
+        }
+    }
 }
 
 @MainActor
 final class AppNavigation: ObservableObject {
     @Published var section: AppSection = .overview
+    @Published var settingsTab = "tracking"
 }
 
 struct WorkspaceView: View {
@@ -40,10 +53,19 @@ struct WorkspaceView: View {
             sidebar
             Divider().overlay(Color.workBorder)
             ZStack {
-                ReportView(tracker: tracker, openBrowserSetup: { navigation.section = .preferences })
+                ReportView(tracker: tracker, openBrowserSetup: {
+                    navigation.settingsTab = "tracking"
+                    navigation.section = .preferences
+                })
                     .opacity(navigation.section == .overview ? 1 : 0)
                     .allowsHitTesting(navigation.section == .overview)
                     .accessibilityHidden(navigation.section != .overview)
+                if navigation.section == .digest {
+                    DigestView(tracker: tracker, openSettings: {
+                        navigation.settingsTab = "capture"
+                        navigation.section = .preferences
+                    })
+                }
                 if navigation.section == .preferences {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
@@ -60,7 +82,7 @@ struct WorkspaceView: View {
                         }
                         .padding(.horizontal, 24)
                         .padding(.top, 19)
-                        PreferencesView(tracker: tracker)
+                        PreferencesView(tracker: tracker, tab: $navigation.settingsTab)
                             .background(Color.workSurface, in: RoundedRectangle(cornerRadius: 20))
                             .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Color.workBorder))
                             .padding([.horizontal, .bottom], 24)
@@ -119,6 +141,10 @@ struct WorkspaceView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(Color.workMuted)
                     .fixedSize(horizontal: false, vertical: true)
+                if let status = tracker.workCaptureStatus {
+                    Text(status).font(.system(size: 11)).foregroundStyle(Color.workAccent)
+                        .lineLimit(2)
+                }
                 Button(tracker.preferences.paused ? "继续统计" : "暂停统计", action: tracker.togglePause)
                 .buttonStyle(.bordered)
                 .controlSize(.small)

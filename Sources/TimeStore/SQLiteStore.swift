@@ -7,6 +7,18 @@ public enum StoreError: Error {
     case invalidCorrection
 }
 
+public struct WorkActivityRecord: Identifiable, Codable, Equatable {
+    public var id: UUID { activity.id }
+    public let activity: WorkActivity
+    public let segmentID: Int64
+    public let source: String
+    public let timeZone: String
+    public let note: String?
+    public let excluded: Bool
+
+    public var description: String { note ?? activity.description }
+}
+
 public struct ReportEntry: Identifiable, Equatable {
     public let id: Int64
     public let start: Date
@@ -141,6 +153,7 @@ public final class SQLiteStore {
         do {
             sqlite3_busy_timeout(db, 1500)
             try run("PRAGMA secure_delete = ON")
+            try run("PRAGMA foreign_keys = ON")
             try run("PRAGMA journal_mode = DELETE")
             try run("""
                 CREATE TABLE IF NOT EXISTS preferences (id INTEGER PRIMARY KEY CHECK (id = 1), json BLOB NOT NULL);
@@ -168,6 +181,16 @@ public final class SQLiteStore {
             try run("CREATE INDEX IF NOT EXISTS slice_day ON slice(day, start)")
             try run("CREATE INDEX IF NOT EXISTS slice_end ON slice(end)")
             try run("CREATE INDEX IF NOT EXISTS slice_website_day ON slice(day, host, visit_id) WHERE host IS NOT NULL")
+            try run("""
+                CREATE TABLE IF NOT EXISTS work_activity (
+                    id TEXT PRIMARY KEY, slice_id INTEGER NOT NULL REFERENCES slice(id) ON DELETE CASCADE,
+                    at REAL NOT NULL, project TEXT NOT NULL, action TEXT NOT NULL,
+                    result TEXT NOT NULL, evidence TEXT NOT NULL, note TEXT,
+                    excluded INTEGER NOT NULL DEFAULT 0 CHECK (excluded IN (0,1))
+                )
+                """)
+            try run("CREATE INDEX IF NOT EXISTS work_activity_slice ON work_activity(slice_id, at)")
+            try prepareOperationJSONQueue()
             // Rebuild the projection when opening older stores; the original fragments stay intact.
             try transaction {
                 try run("DROP VIEW IF EXISTS reported_slice")
@@ -193,6 +216,51 @@ public final class SQLiteStore {
 
     deinit { sqlite3_close(db) }
 
+    private func prepareOperationJSONQueue() throws {
+        try run("CREATE TABLE IF NOT EXISTS operation_json_pending (day TEXT PRIMARY KEY)")
+        // Track dirty dates in the same transaction as committed slices and descriptions.
+        for (action, row) in [("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")] {
+            try run("""
+                CREATE TRIGGER IF NOT EXISTS operation_json_slice_\(action.lowercased()) AFTER \(action) ON slice
+                BEGIN
+                    INSERT INTO operation_json_pending (day) VALUES (\(row).day)
+                        ON CONFLICT(day) DO NOTHING;
+                END
+                """)
+            try run("""
+                CREATE TRIGGER IF NOT EXISTS operation_json_activity_\(action.lowercased()) AFTER \(action) ON work_activity
+                BEGIN
+                    INSERT INTO operation_json_pending SELECT day FROM slice WHERE id = \(row).slice_id
+                        ON CONFLICT(day) DO NOTHING;
+                END
+                """)
+        }
+    }
+
+    public func enqueueOperationJSON(day: String) throws {
+        try run("INSERT INTO operation_json_pending VALUES (?) ON CONFLICT(day) DO NOTHING", [.text(day)])
+    }
+
+    public func syncOperationJSON(in directory: URL = OperationJSON.directory, limit: Int = 4) throws -> Int {
+        let days = try query("SELECT day FROM operation_json_pending ORDER BY day DESC LIMIT ?", [.integer(Int64(limit))]) {
+            string($0, 0) ?? ""
+        }
+        var written = 0
+        for day in days {
+            if let period = DigestPeriod(.day, including: day) {
+                let segments = try report(day: day).entries
+                let work = WorkReportInput(period: period, totals: try totals(from: day, through: day),
+                    activities: try workActivities(from: day, through: day), segments: segments)
+                let leisure = LeisureReportInput(period: period,
+                    sources: try sourceTotals(from: day, through: day, bucket: .entertainment), segments: segments)
+                try OperationJSON.write(work, leisure, in: directory)
+                written += 1
+            }
+            try run("DELETE FROM operation_json_pending WHERE day = ?", [.text(day)])
+        }
+        return written
+    }
+
     public func preferences() throws -> Preferences {
         let saved = try query("SELECT json FROM preferences WHERE id = 1") { statement in
             guard let bytes = sqlite3_column_blob(statement, 0) else { throw StoreError.sqlite(SQLITE_CORRUPT) }
@@ -210,8 +278,8 @@ public final class SQLiteStore {
                 [.blob(try JSONEncoder().encode(preferences))])
     }
 
-    public func append(_ slices: [TimeSlice]) throws {
-        guard !slices.isEmpty else { return }
+    public func append(_ slices: [TimeSlice], activities: [PendingWorkActivity] = []) throws {
+        guard !slices.isEmpty || !activities.isEmpty else { return }
         try transaction {
             var lastEnd = try latestEnd() ?? .distantPast
             for slice in slices {
@@ -235,7 +303,73 @@ public final class SQLiteStore {
                 }
                 lastEnd = slice.end
             }
+            for pending in activities where pending.activity.valid {
+                let activity = pending.activity
+                // A new phase of the same browser action promotes its result in place.
+                try run("""
+                    INSERT INTO work_activity (id,slice_id,at,project,action,result,evidence)
+                    SELECT ?,id,?,?,?,?,? FROM slice
+                    WHERE span = ? AND category = 'work' AND start <= ? AND end > ?
+                    ON CONFLICT(id) DO UPDATE SET result = excluded.result, evidence = excluded.evidence
+                    WHERE work_activity.slice_id = excluded.slice_id
+                        AND work_activity.action = excluded.action AND work_activity.project = excluded.project
+                        AND work_activity.result = 'attempted' AND excluded.result = 'confirmed'
+                    """, [.text(activity.id.uuidString), .date(activity.at), .text(activity.project),
+                           .text(activity.action.rawValue), .text(activity.result.rawValue), .text(activity.evidence.rawValue),
+                           .text(pending.spanID.uuidString), .date(activity.at), .date(activity.at)])
+            }
         }
+    }
+
+    public func workActivities(from firstDay: String, through lastDay: String,
+                               segmentID: Int64? = nil) throws -> [WorkActivityRecord] {
+        var condition = "slice.day BETWEEN ? AND ? AND slice.category = 'work'"
+        var values: [Value] = [.text(firstDay), .text(lastDay)]
+        if let segmentID {
+            condition += " AND slice.id = ?"
+            values.append(.integer(segmentID))
+        }
+        return try query("""
+            SELECT ev.id,ev.at,ev.project,ev.action,ev.result,ev.evidence,ev.slice_id,
+                   COALESCE(slice.host, slice.app_name),slice.time_zone,ev.note,ev.excluded
+            FROM work_activity AS ev JOIN slice ON slice.id = ev.slice_id
+            WHERE \(condition) ORDER BY ev.at, ev.id
+            """, values) { row in
+            guard let id = string(row, 0).flatMap(UUID.init(uuidString:)), let project = string(row, 2),
+                  let action = string(row, 3).flatMap(WorkAction.init(rawValue:)),
+                  let result = string(row, 4).flatMap(WorkResult.init(rawValue:)),
+                  let evidence = string(row, 5).flatMap(WorkEvidence.init(rawValue:)),
+                  let source = string(row, 7), let zone = string(row, 8) else { throw StoreError.sqlite(SQLITE_CORRUPT) }
+            return WorkActivityRecord(activity: WorkActivity(id: id, at: timestamp(row, 1), project: project,
+                action: action, result: result, evidence: evidence), segmentID: sqlite3_column_int64(row, 6),
+                source: source, timeZone: zone, note: string(row, 9), excluded: sqlite3_column_int(row, 10) == 1)
+        }
+    }
+
+    public func updateWorkActivity(_ id: UUID, note: String?, excluded: Bool) throws {
+        guard note?.utf8.count ?? 0 <= 600, note?.rangeOfCharacter(from: .controlCharacters) == nil else {
+            throw StoreError.invalidCorrection
+        }
+        try run("UPDATE work_activity SET note = ?, excluded = ? WHERE id = ?",
+                [.optional(note), .integer(excluded ? 1 : 0), .text(id.uuidString)])
+        guard sqlite3_changes(db) == 1 else { throw StoreError.invalidCorrection }
+    }
+
+    public func addWorkNote(to segmentID: Int64, project: String, note: String) throws {
+        let activity = WorkActivity(at: .now, project: project, action: .manualNote, result: .reported, evidence: .userNote)
+        guard activity.valid, !note.isEmpty, note.utf8.count <= 600, note.rangeOfCharacter(from: .controlCharacters) == nil else {
+            throw StoreError.invalidCorrection
+        }
+        try run("""
+            INSERT INTO work_activity (id,slice_id,at,project,action,result,evidence,note)
+            SELECT ?,id,start,?,?,?,?,? FROM slice WHERE id = ? AND category = 'work'
+            """, [.text(activity.id.uuidString), .text(project), .text(activity.action.rawValue),
+                   .text(activity.result.rawValue), .text(activity.evidence.rawValue), .text(note), .integer(segmentID)])
+        guard sqlite3_changes(db) == 1 else { throw StoreError.invalidCorrection }
+    }
+
+    public func deleteWorkActivity(_ id: UUID) throws {
+        try run("DELETE FROM work_activity WHERE id = ?", [.text(id.uuidString)])
     }
 
     public func latestEnd() throws -> Date? {
@@ -244,6 +378,14 @@ public final class SQLiteStore {
 
     public func report(day: String) throws -> DailyReport {
         try report(from: day, through: day)
+    }
+
+    public func fragment(id: Int64) throws -> ReportEntry? {
+        try query("""
+            SELECT id, start, end, category, bucket, rest_reason, app_id, app_name, host, kind, rule_id,
+              time_zone, basis, corrected, day
+            FROM reported_slice WHERE id = ?
+            """, [.integer(id)], readEntry).first
     }
 
     public func report(from firstDay: String, through lastDay: String, bucket: Bucket? = nil,
@@ -382,6 +524,9 @@ public final class SQLiteStore {
                 try run("DELETE FROM slice WHERE id = ?", [.integer(entry.id)])
             }
             guard sqlite3_changes(db) == 1 else { throw StoreError.invalidCorrection }
+            if category != .work {
+                try run("DELETE FROM work_activity WHERE slice_id = ?", [.integer(entry.id)])
+            }
             if let preferences { try save(preferences) }
         }
     }

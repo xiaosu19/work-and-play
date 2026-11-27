@@ -16,12 +16,15 @@ final class Tracker: ObservableObject {
     @Published private(set) var accessibility = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var revision = 0
+    @Published private(set) var workCaptureStatus: String?
+    @Published private(set) var operationJSONError: String?
 
     private let log = Logger(subsystem: "local.workandplay", category: "runtime")
     private var store: SQLiteStore?
     private var engine = TimeEngine(calendar: Tracker.localCalendar)
     private var lock: Int32 = -1
     private var pending: [TimeSlice] = []
+    private var pendingWork: [PendingWorkActivity] = []
     private var timer: Timer?
     private var receiver: LocalBridge.Receiver?
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
@@ -31,6 +34,7 @@ final class Tracker: ObservableObject {
     private var input = DesktopInput()
     private var lastSample: (date: Date, continuous: ContinuousClock.Instant)?
     private var lastFlushUptime: Double = 0
+    private var lastJSONSyncUptime: Double?
     private var lastSavedEnd: Date = .distantPast
     private var previousFocus: Foreground?
     private var interactionFloor = Date()
@@ -44,6 +48,8 @@ final class Tracker: ObservableObject {
     private var sessionInactive = false
     private var screenLocked = false
     private var disposable = false
+    private var workCapture: WorkCaptureSession?
+    private var captureTask: Task<Void, Never>?
     private static let idleStatus = "\(Bucket.entertainment.title) · \(Classification.deviceIdle.label)"
 
     private enum SampleEvent { case regular, sleepStarted, sleepFinished, stopping }
@@ -87,6 +93,12 @@ final class Tracker: ObservableObject {
             } catch {
                 log.error("Automatic classification of earlier activity could not complete")
             }
+            do {
+                try database.enqueueOperationJSON(day: Schedule.dayKey(.now, calendar: Self.localCalendar))
+            } catch {
+                operationJSONError = "无法安排写入本机 JSON，仍可从时间总览查看记录。"
+            }
+            syncOperationJSON(force: true)
             revision += 1
         } catch {
             reportError("无法打开本机数据库。请检查工时簿目录的读写权限。")
@@ -94,14 +106,24 @@ final class Tracker: ObservableObject {
 
         receiver = LocalBridge.Receiver { [weak self] packet in
             let now = Date()
-            guard let self, self.feeds[packet.source, default: ChromeFeed()].receive(packet, at: now) else { return }
+            guard let self else { return BrowserReply(connected: false) }
+            guard self.feeds[packet.source, default: ChromeFeed()].receive(packet, at: now) else {
+                return BrowserReply(connected: true, sequence: packet.sequence)
+            }
             self.updateBrowserConnections(at: now)
-            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == packet.source.rawValue { self.sample(at: now) }
+            guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == packet.source.rawValue
+            else { return BrowserReply(connected: true, sequence: packet.sequence) }
+            self.sample(at: now, browserSignals: packet.page?.workSignals ?? [])
+            let permit = self.workCapture.flatMap { $0.browserSession == packet.session ? $0.browserPermit : nil }
+            return BrowserReply(connected: true, sequence: packet.sequence, permit: permit)
         }
         installObservers()
         sample()
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sample() }
+            MainActor.assumeIsolated {
+                self?.sample()
+                self?.syncOperationJSON()
+            }
         }
         timer.tolerance = 0.1
         RunLoop.main.add(timer, forMode: .common)
@@ -113,6 +135,7 @@ final class Tracker: ObservableObject {
         guard !disposable, timer != nil else { return }
         sample(event: .stopping)
         flush()
+        syncOperationJSON(force: true)
         timer?.invalidate()
         timer = nil
         receiver = nil
@@ -146,6 +169,46 @@ final class Tracker: ObservableObject {
                 limit: Int = -1, offset: Int = 0, newestFirst: Bool = false) -> DailyReport {
         (try? store?.report(from: dayRange.lowerBound, through: dayRange.upperBound, bucket: bucket,
                             source: source, limit: limit, offset: offset, newestFirst: newestFirst)) ?? DailyReport()
+    }
+
+    func workActivities(dayRange: ClosedRange<String>, segmentID: Int64? = nil) -> [WorkActivityRecord] {
+        (try? store?.workActivities(from: dayRange.lowerBound, through: dayRange.upperBound, segmentID: segmentID)) ?? []
+    }
+
+    func fragment(id: Int64) -> ReportEntry? {
+        try? store?.fragment(id: id)
+    }
+
+    func reviseWorkActivity(_ record: WorkActivityRecord, on day: String, note: String?, excluded: Bool) throws {
+        guard let store else { throw StoreError.invalidCorrection }
+        try WorkReportShare.revokeCovering(day, channels: [.work], in: reportShareDirectory)
+        try store.enqueueOperationJSON(day: day)
+        try OperationJSON.remove(day, channels: [.work])
+        try store.updateWorkActivity(record.id, note: note, excluded: excluded)
+        syncOperationJSON(force: true)
+        revision += 1
+    }
+
+    func removeWorkActivity(_ record: WorkActivityRecord, on day: String) throws {
+        guard let store else { throw StoreError.invalidCorrection }
+        try WorkReportShare.revokeCovering(day, channels: [.work], in: reportShareDirectory)
+        try store.enqueueOperationJSON(day: day)
+        try OperationJSON.remove(day, channels: [.work])
+        try store.deleteWorkActivity(record.id)
+        syncOperationJSON(force: true)
+        revision += 1
+    }
+
+    func addWorkNote(_ note: String, project: String, to segment: ReportEntry) throws {
+        guard let store else { throw StoreError.invalidCorrection }
+        try WorkReportShare.revokeCovering(segment.day, channels: [.work], in: reportShareDirectory)
+        try store.addWorkNote(to: segment.id, project: project, note: note)
+        syncOperationJSON(force: true)
+        revision += 1
+    }
+
+    var reportShareDirectory: URL {
+        WorkReportShare.defaultDirectory
     }
 
     func totals(dayRange: ClosedRange<String>) -> [ReportTotal] {
@@ -202,7 +265,11 @@ final class Tracker: ObservableObject {
         var next = preferences
         if let futureRule { next.rules.append(futureRule) }
         do {
+            try WorkReportShare.revokeCovering(entry.day, in: reportShareDirectory)
+            try store.enqueueOperationJSON(day: entry.day)
+            try OperationJSON.remove(entry.day, channels: ReportChannel.allCases)
             try store.correct(entry: entry, to: category, saving: futureRule == nil ? nil : next)
+            syncOperationJSON(force: true)
             // A correction seals the database row. A new observation starts any later history.
             apply(next)
             revision += 1
@@ -226,7 +293,8 @@ final class Tracker: ObservableObject {
         sample()
     }
 
-    private func sample(at now: Date = Date(), event: SampleEvent = .regular) {
+    private func sample(at now: Date = Date(), event: SampleEvent = .regular,
+                        browserSignals: [BrowserWorkSignal] = []) {
         // A delayed timer may fire before the wake notification. Wait for the observed wake boundary.
         guard !systemSleeping || event != .regular else { return }
         let uptime = ProcessInfo.processInfo.systemUptime
@@ -341,6 +409,9 @@ final class Tracker: ObservableObject {
         pending += engine.observe(at: now, Observation(foreground: foreground, input: recentInput.map { changed ? now : $0 },
             reading: reading, videoPlaying: page?.videoPlaying ?? false, validUntil: validUntil,
             monitorsIdle: true, deviceInput: deviceInput))
+        observeWorkActivity(identity: identity, decision: decision, token: token, window: window, pid: pid,
+            browserSession: page == nil ? nil : feed?.latest?.session, browserSignals: browserSignals,
+            opening: signals.opening.flatMap { $0 >= interactionFloor ? $0 : nil }, at: now)
         let accuracy: String
         if let browser {
             if page != nil { accuracy = "\(browser.label) 页面级" }
@@ -373,6 +444,7 @@ final class Tracker: ObservableObject {
     }
 
     private func resetInteraction(at now: Date) {
+        clearWorkCapture()
         previousFocus = nil
         currentPID = nil
         browserOpening = nil
@@ -386,15 +458,34 @@ final class Tracker: ObservableObject {
         if uptime - lastFlushUptime >= 3 { flush() }
     }
 
+    func syncOperationJSON(force: Bool = false) {
+        guard let store else { return }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        if !force, let lastJSONSyncUptime, uptime - lastJSONSyncUptime < 15 { return }
+        lastJSONSyncUptime = uptime
+        do {
+            _ = try store.syncOperationJSON()
+            if operationJSONError != nil { operationJSONError = nil }
+        } catch {
+            if operationJSONError == nil {
+                operationJSONError = "暂时无法保存本机 JSON，工时簿会自动重试。"
+                log.error("Could not update local operation JSON")
+            }
+        }
+    }
+
     @discardableResult
     private func flush() -> Bool {
         lastFlushUptime = ProcessInfo.processInfo.systemUptime
-        guard !pending.isEmpty else { return true }
-        guard let store else { pending.removeAll(); return false }
+        let end = pending.last?.end ?? lastSavedEnd
+        let ready = pendingWork.filter { $0.activity.at < end }
+        guard !pending.isEmpty || !ready.isEmpty else { return true }
+        guard let store else { pending.removeAll(); pendingWork.removeAll(); return false }
         do {
-            try store.append(pending)
+            try store.append(pending, activities: ready)
             lastSavedEnd = max(lastSavedEnd, pending.last?.end ?? .distantPast)
             pending.removeAll(keepingCapacity: true)
+            pendingWork.removeAll { $0.activity.at < end }
             if errorMessage == "工时暂未写入本机数据库。工时簿会自动重试。" { errorMessage = nil }
             revision += 1
             return true
@@ -403,6 +494,82 @@ final class Tracker: ObservableObject {
             reportError("工时暂未写入本机数据库。工时簿会自动重试。")
             return false
         }
+    }
+
+    static func captureWindowIsFocused(pid: pid_t, title: String) -> Bool {
+        let console = consoleState
+        return console.active && !console.locked
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+            && DesktopWindow(process: pid)?.title == title
+            && !DesktopWindow.focusedElementIsSecure(process: pid)
+    }
+
+    private func clearWorkCapture() {
+        workCapture = nil
+        captureTask?.cancel()
+        captureTask = nil
+        if workCaptureStatus != nil { workCaptureStatus = nil }
+    }
+
+    private func observeWorkActivity(identity: ActivityIdentity, decision: Classification, token: String,
+                                     window: DesktopWindow?, pid: pid_t, browserSession: UUID?,
+                                     browserSignals: [BrowserWorkSignal], opening: Date?, at now: Date) {
+        pendingWork.removeAll { now.timeIntervalSince($0.activity.at) > 20 }
+        guard let rule = WorkCaptureRule.authorized(through: preferences.workCaptureRules, for: identity,
+            category: decision.category) else {
+            clearWorkCapture()
+            return
+        }
+        if workCapture?.rule.id != rule.id || workCapture?.token != token || workCapture?.browserSession != browserSession {
+            clearWorkCapture()
+            workCapture = WorkCaptureSession(rule: rule, token: token, browserSession: browserSession, at: now)
+        }
+        guard var capture = workCapture else { return }
+        let status = "操作描述 · \(capture.rule.project)"
+        if workCaptureStatus != status { workCaptureStatus = status }
+        let span = engine.activeWorkSpan(at: now)
+        if browserSession != nil {
+            pendingWork += capture.browserActivities(browserSignals, span: span, at: now)
+            workCapture = capture
+            return
+        }
+        let edited = window?.edited
+        let changedToEdited = capture.lastEdited == false && edited == true
+        capture.lastEdited = edited
+        if let span, let opening, opening > capture.lastInput && now.timeIntervalSince(opening) <= 2 {
+            capture.lastInput = opening
+            if changedToEdited || now.timeIntervalSince(capture.lastDesktopRecord) >= 30 {
+                capture.lastDesktopRecord = now
+                let action: WorkAction = rule.scope == .conversation ? .customerConversation
+                    : changedToEdited ? .editedDocument : .usedApplication
+                let evidence: WorkEvidence = rule.scope == .conversation ? .selectedConversation
+                    : changedToEdited ? .editedWindow : .foregroundInput
+                pendingWork.append(PendingWorkActivity(spanID: span,
+                    activity: WorkActivity(at: now, project: rule.project, action: action, result: .observed, evidence: evidence)))
+            }
+            if rule.windowOCR, let title = window?.title, captureTask == nil,
+               now.timeIntervalSince(capture.lastOCR) >= 45 {
+                capture.lastOCR = now
+                let captureID = capture.id
+                captureTask = Task.detached(priority: .utility) { [weak self] in
+                    let matched = await WindowText.matches(pid: pid, title: title, keyword: rule.keyword)
+                    guard !Task.isCancelled else { return }
+                    await self?.finishOCR(matched: matched, captureID: captureID, pid: pid, title: title,
+                        span: span, originalTime: now)
+                }
+            }
+        }
+        workCapture = capture
+    }
+
+    private func finishOCR(matched: Bool, captureID: UUID, pid: pid_t, title: String, span: UUID, originalTime: Date) {
+        guard let capture = workCapture, capture.id == captureID else { return }
+        captureTask = nil
+        guard matched, !preferences.paused, !screenLocked, !screenSleeping, !systemSleeping,
+              Self.captureWindowIsFocused(pid: pid, title: title), Date().timeIntervalSince(originalTime) <= 10 else { return }
+        pendingWork.append(PendingWorkActivity(spanID: span, activity: WorkActivity(at: originalTime,
+            project: capture.rule.project, action: .matchedWindowText, result: .observed, evidence: .windowOCR)))
+        flush()
     }
 
     private func reportError(_ message: String) {

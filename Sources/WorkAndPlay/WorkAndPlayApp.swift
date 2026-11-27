@@ -60,6 +60,7 @@ private struct TrackerMenu: View {
     var body: some View {
         Text(tracker.status)
         Text("识别精度 · \(tracker.precision)")
+        if let status = tracker.workCaptureStatus { Text(status) }
         if let error = tracker.errorMessage { Text(error) }
         Divider()
         Button(tracker.preferences.paused ? "继续统计" : "暂停统计", action: tracker.togglePause)
@@ -70,6 +71,7 @@ private struct TrackerMenu: View {
         .keyboardShortcut("d")
         Button("设置…") { open(.preferences) }
             .keyboardShortcut(",")
+        Button("记录与接口") { open(.digest) }
         Divider()
         Button("退出工时簿") { NSApp.terminate(nil) }
             .keyboardShortcut("q")

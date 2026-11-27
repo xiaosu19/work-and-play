@@ -5,7 +5,7 @@ import TimeCore
 
 struct PreferencesView: View {
     @ObservedObject var tracker: Tracker
-    @State private var tab = "tracking"
+    @Binding var tab: String
 
     var body: some View {
         VStack(alignment: .leading) {
@@ -13,6 +13,7 @@ struct PreferencesView: View {
                 TrackingSettings(tracker: tracker).tabItem { Label("计时", systemImage: "timer") }.tag("tracking")
                 RuleSettings(tracker: tracker).tabItem { Label("分类规则", systemImage: "line.3.horizontal.decrease") }.tag("rules")
                 ScheduleSettings(tracker: tracker).tabItem { Label("休息排班", systemImage: "calendar") }.tag("schedule")
+                WorkCaptureSettings(tracker: tracker).tabItem { Label("操作描述", systemImage: "text.badge.checkmark") }.tag("capture")
             }
             if let error = tracker.errorMessage {
                 Label(error, systemImage: "exclamationmark.circle").foregroundStyle(.red)

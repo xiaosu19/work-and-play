@@ -8,11 +8,12 @@ public struct Preferences: Codable, Equatable, Sendable {
     public var paused = false
     public var schedule = Schedule()
     public var rules: [Rule] = []
+    public var workCaptureRules: [WorkCaptureRule] = []
 
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case idleSeconds, readingSeconds, countVideo, countIdleAsEntertainment, paused, schedule, rules
+        case idleSeconds, readingSeconds, countVideo, countIdleAsEntertainment, paused, schedule, rules, workCaptureRules
     }
 
     public init(from decoder: Decoder) throws {
@@ -24,6 +25,7 @@ public struct Preferences: Codable, Equatable, Sendable {
         paused = try values.decode(Bool.self, forKey: .paused)
         schedule = try values.decode(Schedule.self, forKey: .schedule)
         rules = try values.decode([Rule].self, forKey: .rules)
+        workCaptureRules = try values.decodeIfPresent([WorkCaptureRule].self, forKey: .workCaptureRules) ?? []
     }
 }
 
@@ -122,6 +124,11 @@ public struct TimeEngine {
     public func active(at date: Date) -> Bool {
         guard let cursor, let end = deadline, date >= cursor else { return false }
         return date < end
+    }
+
+    public func activeWorkSpan(at date: Date) -> UUID? {
+        guard foreground?.classification.category == .work, active(at: date) else { return nil }
+        return spanID
     }
 
     public func recordingIdle(at date: Date) -> Bool {

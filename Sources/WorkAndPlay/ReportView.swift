@@ -23,6 +23,7 @@ struct ReportView: View {
     @State private var websiteRule: Rule?
     @State private var applicationRule: ApplicationRuleEdit?
     @State private var editing: ReportEntry?
+    @State private var operations: ReportEntry?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private let pageSize = 40
@@ -81,6 +82,7 @@ struct ReportView: View {
         }
         .onChange(of: tracker.revision) { _, _ in load() }
         .sheet(item: $editing) { CorrectionView(entry: $0, tracker: tracker) }
+        .sheet(item: $operations) { SegmentOperations(tracker: tracker, entry: $0) }
         .sheet(item: $ruleSource) { item in
             RuleEditor(tracker: tracker, rule: Rule(appID: item.id.appID ?? "", host: item.id.host ?? ""),
                        guidance: item.id.host == nil
@@ -254,7 +256,8 @@ struct ReportView: View {
         } else {
             LazyVStack(spacing: 0) {
                 ForEach(entries) { entry in
-                    FragmentRow(entry: entry, showDate: period != .day) { editing = entry }
+                    FragmentRow(entry: entry, showDate: period != .day,
+                                showOperations: { operations = entry }, edit: { editing = entry })
                     if entry.id != entries.last?.id { Divider().overlay(Color.workBorder.opacity(0.7)) }
                 }
             }
@@ -520,6 +523,7 @@ private struct MetricSticker: View {
 private struct FragmentRow: View {
     let entry: ReportEntry
     let showDate: Bool
+    let showOperations: () -> Void
     let edit: () -> Void
 
     var body: some View {
@@ -542,8 +546,11 @@ private struct FragmentRow: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(Color.workMuted)
             }
-            Button("修正", action: edit)
-                .controlSize(.small)
+            HStack(spacing: 5) {
+                if entry.category == .work { Button("操作描述", action: showOperations) }
+                Button("修正", action: edit)
+            }
+            .controlSize(.small)
         }
         .padding(.vertical, 10)
     }

@@ -8,6 +8,42 @@ public enum BrowserSource: String, CaseIterable, Codable, Sendable {
     public var label: String { self == .chrome ? "Chrome" : "Edge" }
 }
 
+public struct BrowserWorkSignal: Codable, Equatable {
+    public enum Action: String, Codable {
+        case review, interact, submit, save
+    }
+    public let id: UUID
+    public let permit: UUID
+    public let at: Double
+    public let action: Action
+    public let confirmed: Bool
+    public let matchedTopic: Bool
+
+    public init(id: UUID, permit: UUID, at: Double, action: Action, confirmed: Bool, matchedTopic: Bool = false) {
+        self.id = id; self.permit = permit; self.at = at; self.action = action
+        self.confirmed = confirmed; self.matchedTopic = matchedTopic
+    }
+}
+
+public struct BrowserWorkPermit: Codable, Equatable {
+    public let id: UUID
+    public let keyword: String
+
+    public init(id: UUID, keyword: String) {
+        self.id = id; self.keyword = keyword
+    }
+}
+
+public struct BrowserReply: Codable {
+    public let connected: Bool
+    public let sequence: Int?
+    public let permit: BrowserWorkPermit?
+
+    public init(connected: Bool, sequence: Int? = nil, permit: BrowserWorkPermit? = nil) {
+        self.connected = connected; self.sequence = sequence; self.permit = permit
+    }
+}
+
 public struct ChromePage: Codable, Equatable {
     public let tab: Int
     public let document: UUID
@@ -16,11 +52,13 @@ public struct ChromePage: Codable, Equatable {
     public let readingAt: Double?
     public let interactionAt: Double?
     public let videoPlaying: Bool
+    public let workSignals: [BrowserWorkSignal]?
 
     public init(tab: Int, document: UUID, host: String, path: String, readingAt: Double?, videoPlaying: Bool,
-                interactionAt: Double? = nil) {
+                interactionAt: Double? = nil, workSignals: [BrowserWorkSignal]? = nil) {
         self.tab = tab; self.document = document; self.host = host; self.path = path
         self.readingAt = readingAt; self.interactionAt = interactionAt; self.videoPlaying = videoPlaying
+        self.workSignals = workSignals
     }
 }
 
@@ -34,22 +72,31 @@ public struct ChromePacket: Codable, Equatable {
     public let focused: Bool
     public let disconnect: Bool?
     public let browser: BrowserSource?
+    public let workPermitRequested: Bool?
     public var source: BrowserSource { browser ?? .chrome }
 
     public init(version: Int = 1, session: UUID, sequence: Int, sentAt: Double, page: ChromePage?,
-                focused: Bool = true, disconnect: Bool? = nil, browser: BrowserSource? = nil) {
+                focused: Bool = true, disconnect: Bool? = nil, browser: BrowserSource? = nil,
+                workPermitRequested: Bool? = nil) {
         self.version = version; self.session = session; self.sequence = sequence; self.sentAt = sentAt; self.page = page
         self.focused = focused; self.disconnect = disconnect; self.browser = browser
+        self.workPermitRequested = workPermitRequested
     }
 
     public func identified(as browser: BrowserSource) -> Self {
         Self(version: version, session: session, sequence: sequence, sentAt: sentAt, page: page,
-             focused: focused, disconnect: disconnect, browser: browser)
+             focused: focused, disconnect: disconnect, browser: browser, workPermitRequested: workPermitRequested)
     }
 
     public var valid: Bool {
         guard version == 1, sequence > 0, sentAt.isFinite else { return false }
         guard let page else { return true }
+        if let signals = page.workSignals {
+            guard workPermitRequested == true, signals.count <= 8, signals.allSatisfy({
+                $0.at.isFinite && (0...5000).contains(sentAt - $0.at)
+                    && (!$0.confirmed || $0.action == .save || $0.action == .submit)
+            }) else { return false }
+        }
         return focused && disconnect != true && page.tab >= 0 && page.host.utf8.count <= 253
             && page.host.range(of: #"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"#, options: .regularExpression) != nil
             && page.path.utf8.count <= 2048 && page.path.hasPrefix("/")
@@ -141,11 +188,36 @@ public enum LocalBridge {
         }
     }
 
+    public static func exchange(_ data: Data) -> BrowserReply {
+        let unavailable = BrowserReply(connected: false)
+        guard let path, let address = address(), data.count <= ChromePacket.maxBytes else { return unavailable }
+        let name = "wap-\(getpid())-\(UUID().uuidString.prefix(8)).sock"
+        let returnPath = URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent(name).path
+        guard let returnAddress = Self.address(at: returnPath) else { return unavailable }
+        let fd = socket(AF_UNIX, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return unavailable }
+        defer { close(fd) }
+        _ = fcntl(fd, F_SETFL, O_NONBLOCK)
+        guard withAddress(returnAddress, { bind(fd, $0, $1) }) == 0 else { return unavailable }
+        defer { _ = unlink(returnPath) }
+        guard chmod(returnPath, S_IRUSR | S_IWUSR) == 0,
+              withAddress(address, { connect(fd, $0, $1) }) == 0,
+              data.withUnsafeBytes({ Darwin.send(fd, $0.baseAddress, $0.count, 0) == $0.count })
+        else { return unavailable }
+        var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        guard poll(&descriptor, 1, 250) == 1 else { return BrowserReply(connected: true) }
+        let count = recv(fd, &buffer, buffer.count, 0)
+        guard count > 0, let reply = try? JSONDecoder().decode(BrowserReply.self, from: Data(buffer.prefix(count)))
+        else { return BrowserReply(connected: true) }
+        return reply
+    }
+
     public final class Receiver {
         private let source: DispatchSourceRead
 
         /// The application holds its single-instance lock before creating this receiver.
-        public init?(receive: @escaping (ChromePacket) -> Void) {
+        public init?(receive: @escaping (ChromePacket) -> BrowserReply) {
             guard let address = LocalBridge.address(), let path = LocalBridge.path else { return nil }
             var attributes = stat()
             if lstat(path, &attributes) == 0 {
@@ -165,9 +237,22 @@ public enum LocalBridge {
             source.setEventHandler {
                 var buffer = [UInt8](repeating: 0, count: ChromePacket.maxBytes + 1)
                 for _ in 0..<32 {
-                    let count = recv(fd, &buffer, buffer.count, 0)
+                    var peer = sockaddr_un()
+                    var peerLength = socklen_t(MemoryLayout<sockaddr_un>.size)
+                    let count = withUnsafeMutablePointer(to: &peer) { pointer in
+                        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                            recvfrom(fd, &buffer, buffer.count, 0, $0, &peerLength)
+                        }
+                    }
                     guard count > 0 else { break }
-                    if let packet = ChromePacket.decode(Data(buffer.prefix(count))) { receive(packet) }
+                    guard let packet = ChromePacket.decode(Data(buffer.prefix(count))) else { continue }
+                    let reply = receive(packet)
+                    if packet.workPermitRequested == true, peerLength > 2,
+                       let data = try? JSONEncoder().encode(reply) {
+                        LocalBridge.withAddress(peer) { pointer, _ in
+                            _ = data.withUnsafeBytes { sendto(fd, $0.baseAddress, $0.count, 0, pointer, peerLength) }
+                        }
+                    }
                 }
             }
             source.setCancelHandler { close(fd) }
@@ -179,6 +264,10 @@ public enum LocalBridge {
 
     private static func address() -> sockaddr_un? {
         guard let path else { return nil }
+        return address(at: path)
+    }
+
+    private static func address(at path: String) -> sockaddr_un? {
         var address = sockaddr_un()
         let capacity = MemoryLayout.size(ofValue: address.sun_path)
         let bytes = Array(path.utf8)

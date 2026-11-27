@@ -9,6 +9,8 @@ let activeTab;
 let connected = false;
 let ownedFocus = false;
 let pageAvailable = false;
+let lastPermitRequest = 0;
+let permitRequest;
 const loadingDocuments = new Map();
 
 function connect() {
@@ -18,7 +20,16 @@ function connect() {
   session = crypto.randomUUID();
   sequence = 0;
   connection.onMessage.addListener(reply => {
-    if (port === connection) connected = reply.connected === true;
+    if (port !== connection) return;
+    connected = reply.connected === true;
+    const request = permitRequest;
+    if (!request || request.sequence !== reply.sequence) return;
+    permitRequest = undefined;
+    if (request.generation !== generation || request.tab !== activeTab || Date.now() - request.at > 500) return;
+    void chrome.tabs.sendMessage(request.tab, {
+      type: "work-permit", document: request.document, host: request.host, path: request.path,
+      permit: reply.permit || null
+    }, { frameId: 0 }).catch(() => {});
   });
   connection.onDisconnect.addListener(() => {
     void chrome.runtime.lastError;
@@ -32,7 +43,15 @@ function connect() {
 function send(page, focused) {
   connect();
   try {
-    port.postMessage({ version: 1, session, sequence: ++sequence, sentAt: Date.now(), page, focused });
+    const sentAt = Date.now();
+    const workPermitRequested = !!page && (sentAt - lastPermitRequest >= 900 || !!page.workSignals?.length);
+    const nextSequence = ++sequence;
+    if (workPermitRequested) {
+      lastPermitRequest = sentAt;
+      permitRequest = { sequence: nextSequence, tab: page.tab, document: page.document,
+        host: page.host, path: page.path, generation, at: sentAt };
+    }
+    port.postMessage({ version: 1, session, sequence: nextSequence, sentAt, page, focused, workPermitRequested });
   } catch {
     port = undefined;
     connected = false;
@@ -85,6 +104,8 @@ function invalidate() {
   generation++;
   activeTab = undefined;
   pageAvailable = false;
+  permitRequest = undefined;
+  lastPermitRequest = 0;
   if (ownedFocus) send(null, true);
   void sample();
 }
